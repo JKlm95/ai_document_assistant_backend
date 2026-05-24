@@ -76,3 +76,13 @@ The upload lifecycle is: authenticate user, validate MIME/extension/size, reject
 Security constraints: never trust client filenames for paths, prevent path traversal through storage-root resolution, avoid overwriting generated paths, keep storage outside public static serving, and return `404` for foreign project/document access to avoid resource existence leaks.
 
 Future processing should transition `uploaded -> processing -> ready` or `failed`, then add parser-specific extraction, chunking, embedding generation, and RAG retrieval. S3/MinIO, presigned URLs, OCR, and background workers are intentionally out of scope for the local storage foundation.
+
+## Document Processing
+
+Document processing is synchronous in this stage. The lifecycle is `uploaded -> processing -> ready` on success and `uploaded|ready|failed -> processing -> failed` on controlled parser or file errors. Documents already in `processing` are blocked, while `ready` documents can be reprocessed.
+
+Parser implementations live under `app/parsers` and are registered explicitly through `ParserRegistry`. The registry maps known MIME types and extensions to parser instances; unsupported types are handled as controlled failures. There is no dynamic importing, eval, plugin loading, AI call, embedding generation, or vector database interaction.
+
+Current parsers support TXT and Markdown only. They read stored files as UTF-8 with fallback encodings, normalize line endings, and cap extracted text using `MAX_EXTRACTED_TEXT_CHARS`. PDF, DOCX, OCR, chunking, embeddings, and background workers are future RAG stages.
+
+The parser abstraction exists before AI so storage, ownership, processing state, and text extraction can be tested independently. Future RAG should build on the extracted text by adding chunking, embedding generation, vector indexing, and project-scoped retrieval filtered through `project_documents`.

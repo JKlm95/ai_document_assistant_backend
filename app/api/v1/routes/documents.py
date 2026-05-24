@@ -13,13 +13,26 @@ from fastapi import (
     status,
 )
 
-from app.api.deps import get_current_user, get_document_service, get_local_storage_service
+from app.api.deps import (
+    get_current_user,
+    get_document_processing_service,
+    get_document_service,
+    get_local_storage_service,
+)
 from app.models.user import User
 from app.schemas.document import (
+    DocumentContentResponse,
     DocumentCreateRequest,
     DocumentListResponse,
     DocumentResponse,
     DocumentUploadResponse,
+)
+from app.services.document_processing_service import (
+    DocumentAlreadyProcessingError,
+    DocumentProcessingService,
+)
+from app.services.document_processing_service import (
+    DocumentNotFoundError as ProcessingDocumentNotFoundError,
 )
 from app.services.document_service import (
     DocumentNotFoundError,
@@ -69,6 +82,53 @@ async def list_documents(
         offset=offset,
     )
     return _document_list_response(documents, total=total, limit=limit, offset=offset)
+
+
+@router.post("/documents/{document_id}/process", response_model=DocumentResponse)
+async def process_document(
+    document_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    processing_service: Annotated[
+        DocumentProcessingService,
+        Depends(get_document_processing_service),
+    ],
+) -> DocumentResponse:
+    try:
+        document = await processing_service.process_document(
+            document_id=document_id,
+            owner_id=current_user.id,
+        )
+    except ProcessingDocumentNotFoundError as exc:
+        raise _not_found() from exc
+    except DocumentAlreadyProcessingError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Document is already processing",
+        ) from exc
+    return DocumentResponse.model_validate(document)
+
+
+@router.get("/documents/{document_id}/content", response_model=DocumentContentResponse)
+async def get_document_content(
+    document_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    processing_service: Annotated[
+        DocumentProcessingService,
+        Depends(get_document_processing_service),
+    ],
+) -> DocumentContentResponse:
+    try:
+        document = await processing_service.get_document_content(
+            document_id=document_id,
+            owner_id=current_user.id,
+        )
+    except ProcessingDocumentNotFoundError as exc:
+        raise _not_found() from exc
+    return DocumentContentResponse(
+        document=DocumentResponse.model_validate(document),
+        extracted_text=document.extracted_text,
+        extracted_text_length=document.extracted_text_length,
+    )
 
 
 @router.post(

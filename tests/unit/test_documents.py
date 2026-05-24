@@ -14,6 +14,7 @@ from starlette.datastructures import Headers
 
 from app.api.deps import (
     get_current_user,
+    get_document_processing_service,
     get_document_service,
     get_local_storage_service,
     get_project_service,
@@ -22,6 +23,9 @@ from app.main import create_app
 from app.models.document import Document, DocumentProcessingStatus, ProjectDocument
 from app.models.project import Project
 from app.models.user import User
+from app.parsers.base import ParsedDocument
+from app.parsers.registry import ParserRegistry
+from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.project_service import ProjectService
 from app.storage.local_storage import LocalStorageService
@@ -31,6 +35,7 @@ from app.storage.local_storage import LocalStorageService
 class DocumentsClient:
     client: TestClient
     storage_root: Path
+    document_repository: "InMemoryDocumentRepository"
 
 
 class InMemoryProjectRepository:
@@ -209,6 +214,12 @@ def documents_client(tmp_path: Path) -> Iterator[DocumentsClient]:
         document_repository=document_repository,
         project_repository=project_repository,
     )
+    processing_service = DocumentProcessingService(  # type: ignore[arg-type]
+        document_repository=document_repository,
+        parser_registry=ParserRegistry(),
+        storage_service=storage_service,
+        max_extracted_text_chars=10_000,
+    )
     users = {
         "user-one": _build_user(email="one@example.com"),
         "user-two": _build_user(email="two@example.com"),
@@ -227,10 +238,15 @@ def documents_client(tmp_path: Path) -> Iterator[DocumentsClient]:
     app.dependency_overrides[get_current_user] = override_current_user
     app.dependency_overrides[get_project_service] = lambda: project_service
     app.dependency_overrides[get_document_service] = lambda: document_service
+    app.dependency_overrides[get_document_processing_service] = lambda: processing_service
     app.dependency_overrides[get_local_storage_service] = lambda: storage_service
 
     with TestClient(app) as client:
-        yield DocumentsClient(client=client, storage_root=tmp_path)
+        yield DocumentsClient(
+            client=client,
+            storage_root=tmp_path,
+            document_repository=document_repository,
+        )
 
     app.dependency_overrides.clear()
 
@@ -469,6 +485,190 @@ def test_upload_sanitizes_path_traversal_filename(documents_client: DocumentsCli
     )
 
 
+def test_process_txt_document_ok_and_persists_extracted_text(
+    documents_client: DocumentsClient,
+) -> None:
+    upload_response = _upload_document(
+        documents_client.client,
+        filename="notes.txt",
+        content=b"hello\r\nworld",
+        content_type="text/plain",
+    )
+    document_id = upload_response.json()["document"]["id"]
+
+    process_response = documents_client.client.post(
+        f"/api/v1/documents/{document_id}/process",
+        headers=_auth_headers(),
+    )
+    content_response = documents_client.client.get(
+        f"/api/v1/documents/{document_id}/content",
+        headers=_auth_headers(),
+    )
+
+    assert process_response.status_code == 200
+    assert process_response.json()["processing_status"] == "ready"
+    assert process_response.json()["extracted_text_length"] == 11
+    assert content_response.status_code == 200
+    assert content_response.json()["extracted_text"] == "hello\nworld"
+    assert content_response.json()["extracted_text_length"] == 11
+
+
+def test_process_markdown_document_ok(documents_client: DocumentsClient) -> None:
+    upload_response = _upload_document(
+        documents_client.client,
+        filename="notes.md",
+        content=b"# Title\r\nBody",
+        content_type="text/markdown",
+    )
+    document_id = upload_response.json()["document"]["id"]
+
+    response = documents_client.client.post(
+        f"/api/v1/documents/{document_id}/process",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["processing_status"] == "ready"
+    assert response.json()["extracted_text_length"] == len("# Title\nBody")
+
+
+def test_process_unsupported_type_sets_failed_status(documents_client: DocumentsClient) -> None:
+    upload_response = _upload_document(
+        documents_client.client,
+        filename="paper.pdf",
+        content=b"%PDF-1.4",
+        content_type="application/pdf",
+    )
+    document_id = upload_response.json()["document"]["id"]
+
+    response = documents_client.client.post(
+        f"/api/v1/documents/{document_id}/process",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["processing_status"] == "failed"
+    assert response.json()["processing_error"] is not None
+
+
+def test_process_missing_file_sets_failed_status(documents_client: DocumentsClient) -> None:
+    upload_response = _upload_document(
+        documents_client.client,
+        filename="missing.txt",
+        content=b"temporary",
+        content_type="text/plain",
+    )
+    document = upload_response.json()["document"]
+    (documents_client.storage_root / document["storage_path"]).unlink()
+
+    response = documents_client.client.post(
+        f"/api/v1/documents/{document['id']}/process",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["processing_status"] == "failed"
+    assert response.json()["processing_error"] is not None
+
+
+def test_process_can_reprocess_ready_document(documents_client: DocumentsClient) -> None:
+    upload_response = _upload_document(
+        documents_client.client,
+        filename="reprocess.txt",
+        content=b"first",
+        content_type="text/plain",
+    )
+    document = upload_response.json()["document"]
+    process_url = f"/api/v1/documents/{document['id']}/process"
+
+    first_response = documents_client.client.post(process_url, headers=_auth_headers())
+    second_response = documents_client.client.post(process_url, headers=_auth_headers())
+
+    assert first_response.status_code == 200
+    assert first_response.json()["processing_status"] == "ready"
+    assert second_response.status_code == 200
+    assert second_response.json()["processing_status"] == "ready"
+
+
+def test_process_blocks_document_already_processing(documents_client: DocumentsClient) -> None:
+    upload_response = _upload_document(
+        documents_client.client,
+        filename="processing.txt",
+        content=b"processing",
+        content_type="text/plain",
+    )
+    document_id = UUID(upload_response.json()["document"]["id"])
+    document = _get_document_from_test_app(documents_client, document_id)
+    document.processing_status = DocumentProcessingStatus.PROCESSING
+
+    response = documents_client.client.post(
+        f"/api/v1/documents/{document_id}/process",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 409
+
+
+def test_process_ownership_isolation_and_auth_required(
+    documents_client: DocumentsClient,
+) -> None:
+    foreign_upload = _upload_document(
+        documents_client.client,
+        filename="foreign.txt",
+        content=b"secret",
+        content_type="text/plain",
+        token="user-two",
+    )
+    foreign_document_id = foreign_upload.json()["document"]["id"]
+
+    foreign_response = documents_client.client.post(
+        f"/api/v1/documents/{foreign_document_id}/process",
+        headers=_auth_headers(),
+    )
+    unauthenticated_response = documents_client.client.post(
+        f"/api/v1/documents/{foreign_document_id}/process",
+    )
+
+    assert foreign_response.status_code == 404
+    assert unauthenticated_response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_parser_exception_sets_failed_status(tmp_path: Path) -> None:
+    project_repository = InMemoryProjectRepository()
+    document_repository = InMemoryDocumentRepository()
+    storage_service = _build_storage_service(tmp_path)
+    document_service = DocumentService(  # type: ignore[arg-type]
+        document_repository=document_repository,
+        project_repository=project_repository,
+    )
+    processing_service = DocumentProcessingService(  # type: ignore[arg-type]
+        document_repository=document_repository,
+        parser_registry=FailingParserRegistry(),
+        storage_service=storage_service,
+        max_extracted_text_chars=10_000,
+    )
+    owner_id = uuid4()
+    document, _ = await document_service.upload_document(
+        owner_id=owner_id,
+        upload_file=_build_upload_file(
+            filename="broken.txt",
+            content=b"broken",
+            content_type="text/plain",
+        ),
+        storage_service=storage_service,
+        project_id=None,
+    )
+
+    processed_document = await processing_service.process_document(
+        document_id=document.id,
+        owner_id=owner_id,
+    )
+
+    assert processed_document.processing_status == DocumentProcessingStatus.FAILED
+    assert processed_document.processing_error == "parser exploded"
+
+
 @pytest.mark.asyncio
 async def test_upload_cleans_file_when_metadata_write_fails(tmp_path: Path) -> None:
     project_repository = InMemoryProjectRepository()
@@ -497,6 +697,20 @@ async def test_upload_cleans_file_when_metadata_write_fails(tmp_path: Path) -> N
 class FailingDocumentRepository(InMemoryDocumentRepository):
     async def create(self, **kwargs: object) -> Document:
         raise RuntimeError("simulated db write failure")
+
+
+class ExplodingParser:
+    def parse(self, path: Path, *, max_chars: int) -> ParsedDocument:
+        raise RuntimeError("parser exploded")
+
+
+class FailingParserRegistry:
+    def get_parser(self, *, mime_type: str, file_extension: str | None) -> ExplodingParser:
+        return ExplodingParser()
+
+
+def _get_document_from_test_app(documents_client: DocumentsClient, document_id: UUID) -> Document:
+    return documents_client.document_repository.documents[document_id]
 
 
 def _build_user(*, email: str) -> User:

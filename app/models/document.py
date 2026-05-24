@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -61,6 +61,10 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     file_extension: Mapped[str | None] = mapped_column(String(20), nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extracted_text_length: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     owner: Mapped[User] = relationship(back_populates="documents")
     project_documents: Mapped[list[ProjectDocument]] = relationship(

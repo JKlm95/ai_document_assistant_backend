@@ -145,6 +145,18 @@ curl -X POST http://localhost:8000/api/v1/documents/upload \
 
 Allowed upload extensions are `pdf`, `txt`, `md`, and `docx`. Uploaded files are stored locally under the configured `STORAGE_ROOT`; files are not publicly served.
 
+Process TXT or Markdown document content:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/documents/<document_id>/process \
+  -H "Authorization: Bearer <access_token>"
+
+curl http://localhost:8000/api/v1/documents/<document_id>/content \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Processing currently extracts text only for `txt` and `md` files. PDF, DOCX, OCR, chunking, embeddings, and AI processing are intentionally not implemented yet.
+
 ## Development Without Docker
 
 ```bash

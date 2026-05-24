@@ -30,8 +30,17 @@ class DocumentResponse(BaseModel):
     processing_status: DocumentProcessingStatus
     content_hash: str | None
     uploaded_at: datetime | None
+    extracted_text_length: int | None
+    processed_at: datetime | None
+    processing_error: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class DocumentContentResponse(BaseModel):
+    document: DocumentResponse
+    extracted_text: str | None
+    extracted_text_length: int | None
 
 
 class DocumentUploadResponse(BaseModel):

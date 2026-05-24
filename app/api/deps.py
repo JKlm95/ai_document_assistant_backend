@@ -8,10 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
 from app.models.user import User
+from app.parsers.registry import ParserRegistry
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.project_repository import ProjectRepository
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService, InvalidCredentialsError
+from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.project_service import ProjectService
 from app.storage.local_storage import LocalStorageService
@@ -68,6 +70,24 @@ def get_local_storage_service(
         max_upload_size_bytes=settings.max_upload_size_bytes,
         allowed_extensions=_split_csv_setting(settings.allowed_upload_extensions),
         allowed_mime_types=_split_csv_setting(settings.allowed_upload_mime_types),
+    )
+
+
+def get_parser_registry() -> ParserRegistry:
+    return ParserRegistry()
+
+
+def get_document_processing_service(
+    document_repository: Annotated[DocumentRepository, Depends(get_document_repository)],
+    parser_registry: Annotated[ParserRegistry, Depends(get_parser_registry)],
+    storage_service: Annotated[LocalStorageService, Depends(get_local_storage_service)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> DocumentProcessingService:
+    return DocumentProcessingService(
+        document_repository=document_repository,
+        parser_registry=parser_registry,
+        storage_service=storage_service,
+        max_extracted_text_chars=settings.max_extracted_text_chars,
     )
 
 

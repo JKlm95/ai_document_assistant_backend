@@ -33,6 +33,7 @@ class Settings(BaseSettings):
         "application/pdf,text/plain,text/markdown,application/markdown,"
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
+    max_extracted_text_chars: int = 1_000_000
 
 
 @lru_cache
