@@ -92,6 +92,40 @@ curl -X DELETE http://localhost:8000/api/v1/projects/<project_id> \
   -H "Authorization: Bearer <access_token>"
 ```
 
+## Document Metadata Smoke Test
+
+Create document metadata:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/documents \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Project notes","original_filename":"notes.txt","mime_type":"text/plain","file_size_bytes":128,"storage_provider":"local"}'
+```
+
+List and get documents:
+
+```bash
+curl "http://localhost:8000/api/v1/documents?limit=20&offset=0" \
+  -H "Authorization: Bearer <access_token>"
+
+curl http://localhost:8000/api/v1/documents/<document_id> \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Attach, list, and detach project documents:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/projects/<project_id>/documents/<document_id> \
+  -H "Authorization: Bearer <access_token>"
+
+curl http://localhost:8000/api/v1/projects/<project_id>/documents \
+  -H "Authorization: Bearer <access_token>"
+
+curl -X DELETE http://localhost:8000/api/v1/projects/<project_id>/documents/<document_id> \
+  -H "Authorization: Bearer <access_token>"
+```
+
 ## Development Without Docker
 
 ```bash

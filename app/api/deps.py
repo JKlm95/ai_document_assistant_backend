@@ -7,9 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
 from app.models.user import User
+from app.repositories.document_repository import DocumentRepository
 from app.repositories.project_repository import ProjectRepository
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService, InvalidCredentialsError
+from app.services.document_service import DocumentService
 from app.services.project_service import ProjectService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -34,10 +36,26 @@ def get_project_repository(
     return ProjectRepository(session)
 
 
+def get_document_repository(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> DocumentRepository:
+    return DocumentRepository(session)
+
+
 def get_project_service(
     project_repository: Annotated[ProjectRepository, Depends(get_project_repository)],
 ) -> ProjectService:
     return ProjectService(project_repository=project_repository)
+
+
+def get_document_service(
+    document_repository: Annotated[DocumentRepository, Depends(get_document_repository)],
+    project_repository: Annotated[ProjectRepository, Depends(get_project_repository)],
+) -> DocumentService:
+    return DocumentService(
+        document_repository=document_repository,
+        project_repository=project_repository,
+    )
 
 
 async def get_current_user(

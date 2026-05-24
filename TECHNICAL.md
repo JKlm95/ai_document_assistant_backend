@@ -58,3 +58,11 @@ Passwords are hashed with `bcrypt`. The password is SHA-256 prehashed before bcr
 Projects are strictly user-scoped. Every project endpoint requires the current authenticated user, and service-layer checks prevent reading, updating, or archiving projects owned by another user.
 
 Project deletion is implemented as soft delete via `projects.is_archived`. Archived projects are hidden from list and detail endpoints by default, which preserves future references for documents and chat sessions. Project lists use `limit`/`offset` pagination and sort by `updated_at` descending.
+
+## Documents
+
+The current document lifecycle is metadata-first: users can create document records with title, original filename, MIME type, file size, storage provider placeholder, processing status, and optional content hash. There is no file upload, object storage, parsing, chunking, embedding, or AI processing in this stage.
+
+Documents are owned globally by a user and can be attached to many projects through `project_documents`. Project-document linking is idempotent: repeating the same attach request returns the document without creating a duplicate link. Detach removes only the link, not the document metadata record.
+
+Metadata-first architecture lets the API, ownership boundaries, project linking, and future processing state be validated before introducing storage and RAG complexity. The future RAG pipeline should add upload/storage, text extraction, chunk creation, embedding generation, and project-scoped vector retrieval filtered through `project_documents`.

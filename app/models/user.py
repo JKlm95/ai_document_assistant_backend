@@ -31,7 +31,7 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
     )
     documents: Mapped[list[Document]] = relationship(
-        back_populates="user",
+        back_populates="owner",
         cascade="all, delete-orphan",
     )
     chat_sessions: Mapped[list[ChatSession]] = relationship(

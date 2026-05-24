@@ -41,3 +41,15 @@ def test_document_chunk_embedding_dimension_is_768() -> None:
 def test_document_chunk_uses_chunk_metadata_column_name() -> None:
     assert "chunk_metadata" in DocumentChunk.__table__.columns
     assert "metadata" not in DocumentChunk.__table__.columns
+
+
+def test_document_metadata_columns_match_current_api_contract() -> None:
+    document_columns = Document.__table__.columns
+
+    assert "owner_id" in document_columns
+    assert "title" in document_columns
+    assert "original_filename" in document_columns
+    assert "mime_type" in document_columns
+    assert "file_size_bytes" in document_columns
+    assert "processing_status" in document_columns
+    assert "storage_path" not in document_columns
