@@ -380,6 +380,19 @@ def test_upload_rejects_invalid_mime_oversized_empty_and_requires_auth(
     assert unauthenticated_response.status_code == 401
 
 
+def test_upload_rejects_invalid_extension_even_with_valid_mime(
+    documents_client: DocumentsClient,
+) -> None:
+    response = _upload_document(
+        documents_client.client,
+        filename="malware.exe",
+        content=b"plain text",
+        content_type="text/plain",
+    )
+
+    assert response.status_code == 400
+
+
 def test_upload_can_attach_to_own_project_and_rejects_foreign_project(
     documents_client: DocumentsClient,
 ) -> None:
