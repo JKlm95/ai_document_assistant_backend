@@ -46,3 +46,9 @@ The initial migration does not create a HNSW/IVFFLAT vector index yet. That inde
 Runtime configuration is loaded from environment variables through `pydantic-settings`.
 
 Secrets such as `JWT_SECRET` and `GEMINI_API_KEY` must stay outside git-tracked files.
+
+## Authentication
+
+Access tokens are signed JWT bearer tokens. JWT settings, including `JWT_SECRET`, algorithm, and token lifetime, are loaded from environment-backed settings.
+
+Passwords are hashed with `bcrypt`. The password is SHA-256 prehashed before bcrypt to avoid bcrypt's 72-byte input limit and compatibility issues with newer `bcrypt` package behavior. Raw passwords and secrets must never be logged.

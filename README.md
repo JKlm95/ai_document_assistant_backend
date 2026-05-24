@@ -34,6 +34,31 @@ Expected response:
 {"status":"ok"}
 ```
 
+## Auth Smoke Test
+
+Register:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","password":"strong-password","full_name":"Test User"}'
+```
+
+Login:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","password":"strong-password"}'
+```
+
+Get current user:
+
+```bash
+curl http://localhost:8000/api/v1/auth/me \
+  -H "Authorization: Bearer <access_token>"
+```
+
 ## Development Without Docker
 
 ```bash
