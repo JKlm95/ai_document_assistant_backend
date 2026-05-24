@@ -52,3 +52,9 @@ Secrets such as `JWT_SECRET` and `GEMINI_API_KEY` must stay outside git-tracked 
 Access tokens are signed JWT bearer tokens. JWT settings, including `JWT_SECRET`, algorithm, and token lifetime, are loaded from environment-backed settings.
 
 Passwords are hashed with `bcrypt`. The password is SHA-256 prehashed before bcrypt to avoid bcrypt's 72-byte input limit and compatibility issues with newer `bcrypt` package behavior. Raw passwords and secrets must never be logged.
+
+## Projects
+
+Projects are strictly user-scoped. Every project endpoint requires the current authenticated user, and service-layer checks prevent reading, updating, or archiving projects owned by another user.
+
+Project deletion is implemented as soft delete via `projects.is_archived`. Archived projects are hidden from list and detail endpoints by default, which preserves future references for documents and chat sessions. Project lists use `limit`/`offset` pagination and sort by `updated_at` descending.

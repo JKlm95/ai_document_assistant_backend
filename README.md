@@ -59,6 +59,39 @@ curl http://localhost:8000/api/v1/auth/me \
   -H "Authorization: Bearer <access_token>"
 ```
 
+## Projects Smoke Test
+
+Create project:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/projects \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Research","description":"Private research workspace"}'
+```
+
+List projects:
+
+```bash
+curl "http://localhost:8000/api/v1/projects?limit=20&offset=0" \
+  -H "Authorization: Bearer <access_token>"
+```
+
+Get, update, and archive a project:
+
+```bash
+curl http://localhost:8000/api/v1/projects/<project_id> \
+  -H "Authorization: Bearer <access_token>"
+
+curl -X PATCH http://localhost:8000/api/v1/projects/<project_id> \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Updated Research","description":"Updated description"}'
+
+curl -X DELETE http://localhost:8000/api/v1/projects/<project_id> \
+  -H "Authorization: Bearer <access_token>"
+```
+
 ## Development Without Docker
 
 ```bash
