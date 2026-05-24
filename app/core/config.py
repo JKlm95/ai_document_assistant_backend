@@ -34,6 +34,8 @@ class Settings(BaseSettings):
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
     max_extracted_text_chars: int = 1_000_000
+    chunk_size_chars: int = 1_200
+    chunk_overlap_chars: int = 200
 
 
 @lru_cache

@@ -1,10 +1,12 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chunking.models import ChunkResult
 from app.models.document import Document, ProjectDocument
+from app.models.document_chunk import DocumentChunk
 
 
 class DocumentRepository:
@@ -111,6 +113,42 @@ class DocumentRepository:
             .where(ProjectDocument.project_id == project_id, Document.owner_id == owner_id)
         )
         return result.scalar_one()
+
+    async def delete_chunks_for_document(self, *, document_id: UUID) -> None:
+        await self._session.execute(
+            delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
+        )
+        await self._session.flush()
+
+    async def create_chunks(
+        self,
+        *,
+        document_id: UUID,
+        chunks: list[ChunkResult],
+    ) -> list[DocumentChunk]:
+        document_chunks = [
+            DocumentChunk(
+                document_id=document_id,
+                chunk_index=chunk.chunk_index,
+                text=chunk.text,
+                char_count=chunk.char_count,
+                token_count_estimate=chunk.token_count_estimate,
+                start_offset=chunk.start_offset,
+                end_offset=chunk.end_offset,
+            )
+            for chunk in chunks
+        ]
+        self._session.add_all(document_chunks)
+        await self._session.flush()
+        return document_chunks
+
+    async def list_chunks_for_document(self, *, document_id: UUID) -> list[DocumentChunk]:
+        result = await self._session.execute(
+            select(DocumentChunk)
+            .where(DocumentChunk.document_id == document_id)
+            .order_by(DocumentChunk.chunk_index.asc())
+        )
+        return list(result.scalars().all())
 
     async def commit(self) -> None:
         await self._session.commit()

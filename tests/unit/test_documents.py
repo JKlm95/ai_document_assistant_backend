@@ -19,8 +19,11 @@ from app.api.deps import (
     get_local_storage_service,
     get_project_service,
 )
+from app.chunking.fixed_size_chunker import FixedSizeChunkingStrategy
+from app.chunking.models import ChunkResult
 from app.main import create_app
 from app.models.document import Document, DocumentProcessingStatus, ProjectDocument
+from app.models.document_chunk import DocumentChunk
 from app.models.project import Project
 from app.models.user import User
 from app.parsers.base import ParsedDocument
@@ -93,6 +96,7 @@ class InMemoryProjectRepository:
 class InMemoryDocumentRepository:
     def __init__(self) -> None:
         self.documents: dict[UUID, Document] = {}
+        self.chunks: dict[UUID, list[DocumentChunk]] = {}
         self.project_documents: dict[tuple[UUID, UUID], ProjectDocument] = {}
 
     async def create(
@@ -125,6 +129,8 @@ class InMemoryDocumentRepository:
         )
         document.id = document_id or uuid4()
         document.processing_status = DocumentProcessingStatus.UPLOADED
+        document.chunk_count = 0
+        document.chunked_at = None
         document.created_at = now
         document.updated_at = now
         self.documents[document.id] = document
@@ -196,6 +202,39 @@ class InMemoryDocumentRepository:
             )
         )
 
+    async def delete_chunks_for_document(self, *, document_id: UUID) -> None:
+        self.chunks[document_id] = []
+
+    async def create_chunks(
+        self,
+        *,
+        document_id: UUID,
+        chunks: list[ChunkResult],
+    ) -> list[DocumentChunk]:
+        now = datetime.now(UTC)
+        document_chunks = []
+        for chunk in chunks:
+            document_chunk = DocumentChunk(
+                document_id=document_id,
+                chunk_index=chunk.chunk_index,
+                text=chunk.text,
+                char_count=chunk.char_count,
+                token_count_estimate=chunk.token_count_estimate,
+                start_offset=chunk.start_offset,
+                end_offset=chunk.end_offset,
+            )
+            document_chunk.id = uuid4()
+            document_chunk.created_at = now
+            document_chunks.append(document_chunk)
+        self.chunks[document_id] = document_chunks
+        return document_chunks
+
+    async def list_chunks_for_document(self, *, document_id: UUID) -> list[DocumentChunk]:
+        return sorted(
+            self.chunks.get(document_id, []),
+            key=lambda chunk: chunk.chunk_index,
+        )
+
     async def commit(self) -> None:
         return None
 
@@ -217,6 +256,10 @@ def documents_client(tmp_path: Path) -> Iterator[DocumentsClient]:
     processing_service = DocumentProcessingService(  # type: ignore[arg-type]
         document_repository=document_repository,
         parser_registry=ParserRegistry(),
+        chunking_strategy=FixedSizeChunkingStrategy(
+            chunk_size_chars=10,
+            chunk_overlap_chars=2,
+        ),
         storage_service=storage_service,
         max_extracted_text_chars=10_000,
     )
@@ -508,6 +551,7 @@ def test_process_txt_document_ok_and_persists_extracted_text(
     assert process_response.status_code == 200
     assert process_response.json()["processing_status"] == "ready"
     assert process_response.json()["extracted_text_length"] == 11
+    assert process_response.json()["chunk_count"] == 2
     assert content_response.status_code == 200
     assert content_response.json()["extracted_text"] == "hello\nworld"
     assert content_response.json()["extracted_text_length"] == 11
@@ -530,6 +574,7 @@ def test_process_markdown_document_ok(documents_client: DocumentsClient) -> None
     assert response.status_code == 200
     assert response.json()["processing_status"] == "ready"
     assert response.json()["extracted_text_length"] == len("# Title\nBody")
+    assert response.json()["chunk_count"] == 2
 
 
 def test_process_unsupported_type_sets_failed_status(documents_client: DocumentsClient) -> None:
@@ -549,6 +594,7 @@ def test_process_unsupported_type_sets_failed_status(documents_client: Documents
     assert response.status_code == 200
     assert response.json()["processing_status"] == "failed"
     assert response.json()["processing_error"] is not None
+    assert response.json()["chunk_count"] == 0
 
 
 def test_process_missing_file_sets_failed_status(documents_client: DocumentsClient) -> None:
@@ -569,6 +615,7 @@ def test_process_missing_file_sets_failed_status(documents_client: DocumentsClie
     assert response.status_code == 200
     assert response.json()["processing_status"] == "failed"
     assert response.json()["processing_error"] is not None
+    assert response.json()["chunk_count"] == 0
 
 
 def test_process_can_reprocess_ready_document(documents_client: DocumentsClient) -> None:
@@ -588,6 +635,132 @@ def test_process_can_reprocess_ready_document(documents_client: DocumentsClient)
     assert first_response.json()["processing_status"] == "ready"
     assert second_response.status_code == 200
     assert second_response.json()["processing_status"] == "ready"
+
+
+def test_chunk_endpoint_returns_ordered_chunks_and_count(
+    documents_client: DocumentsClient,
+) -> None:
+    upload_response = _upload_document(
+        documents_client.client,
+        filename="chunked.txt",
+        content=b"abcdefghij klmnopqrst uvwxyz",
+        content_type="text/plain",
+    )
+    document_id = upload_response.json()["document"]["id"]
+
+    process_response = documents_client.client.post(
+        f"/api/v1/documents/{document_id}/process",
+        headers=_auth_headers(),
+    )
+    chunks_response = documents_client.client.get(
+        f"/api/v1/documents/{document_id}/chunks",
+        headers=_auth_headers(),
+    )
+
+    chunks = chunks_response.json()["chunks"]
+    assert process_response.status_code == 200
+    assert chunks_response.status_code == 200
+    assert chunks_response.json()["chunk_count"] == process_response.json()["chunk_count"]
+    assert [chunk["chunk_index"] for chunk in chunks] == list(range(len(chunks)))
+    assert chunks[0]["text"] == "abcdefghij"
+    assert chunks[1]["text"].startswith("ij klmnop")
+
+
+def test_chunking_is_deterministic() -> None:
+    chunker = FixedSizeChunkingStrategy(chunk_size_chars=8, chunk_overlap_chars=2)
+    text = "alpha beta gamma"
+
+    first_chunks = chunker.chunk(text)
+    second_chunks = chunker.chunk(text)
+
+    assert first_chunks == second_chunks
+
+
+def test_chunking_handles_tiny_and_empty_text() -> None:
+    chunker = FixedSizeChunkingStrategy(chunk_size_chars=10, chunk_overlap_chars=2)
+
+    tiny_chunks = chunker.chunk("tiny")
+    empty_chunks = chunker.chunk(" \n\t ")
+
+    assert len(tiny_chunks) == 1
+    assert tiny_chunks[0].text == "tiny"
+    assert empty_chunks == []
+
+
+def test_chunker_rejects_overlap_greater_than_or_equal_to_chunk_size() -> None:
+    with pytest.raises(ValueError, match="smaller than chunk_size_chars"):
+        FixedSizeChunkingStrategy(chunk_size_chars=10, chunk_overlap_chars=10)
+
+
+def test_reprocess_replaces_chunks(documents_client: DocumentsClient) -> None:
+    upload_response = _upload_document(
+        documents_client.client,
+        filename="replace.txt",
+        content=b"first second third fourth",
+        content_type="text/plain",
+    )
+    document = upload_response.json()["document"]
+    process_url = f"/api/v1/documents/{document['id']}/process"
+    chunks_url = f"/api/v1/documents/{document['id']}/chunks"
+
+    first_response = documents_client.client.post(process_url, headers=_auth_headers())
+    storage_path = documents_client.storage_root / document["storage_path"]
+    storage_path.write_text("short", encoding="utf-8")
+    second_response = documents_client.client.post(process_url, headers=_auth_headers())
+    chunks_response = documents_client.client.get(chunks_url, headers=_auth_headers())
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert second_response.json()["chunk_count"] == 1
+    assert chunks_response.json()["chunks"][0]["text"] == "short"
+
+
+def test_whitespace_only_text_produces_zero_chunks(documents_client: DocumentsClient) -> None:
+    upload_response = _upload_document(
+        documents_client.client,
+        filename="empty-content.txt",
+        content=b" \n\t ",
+        content_type="text/plain",
+    )
+    document_id = upload_response.json()["document"]["id"]
+
+    process_response = documents_client.client.post(
+        f"/api/v1/documents/{document_id}/process",
+        headers=_auth_headers(),
+    )
+    chunks_response = documents_client.client.get(
+        f"/api/v1/documents/{document_id}/chunks",
+        headers=_auth_headers(),
+    )
+
+    assert process_response.status_code == 200
+    assert process_response.json()["processing_status"] == "ready"
+    assert process_response.json()["chunk_count"] == 0
+    assert chunks_response.json()["chunks"] == []
+
+
+def test_chunks_endpoint_ownership_isolation_and_auth_required(
+    documents_client: DocumentsClient,
+) -> None:
+    foreign_upload = _upload_document(
+        documents_client.client,
+        filename="foreign-chunks.txt",
+        content=b"secret chunks",
+        content_type="text/plain",
+        token="user-two",
+    )
+    foreign_document_id = foreign_upload.json()["document"]["id"]
+
+    foreign_response = documents_client.client.get(
+        f"/api/v1/documents/{foreign_document_id}/chunks",
+        headers=_auth_headers(),
+    )
+    unauthenticated_response = documents_client.client.get(
+        f"/api/v1/documents/{foreign_document_id}/chunks",
+    )
+
+    assert foreign_response.status_code == 404
+    assert unauthenticated_response.status_code == 401
 
 
 def test_process_blocks_document_already_processing(documents_client: DocumentsClient) -> None:
@@ -645,6 +818,10 @@ async def test_parser_exception_sets_failed_status(tmp_path: Path) -> None:
     processing_service = DocumentProcessingService(  # type: ignore[arg-type]
         document_repository=document_repository,
         parser_registry=FailingParserRegistry(),
+        chunking_strategy=FixedSizeChunkingStrategy(
+            chunk_size_chars=10,
+            chunk_overlap_chars=2,
+        ),
         storage_service=storage_service,
         max_extracted_text_chars=10_000,
     )

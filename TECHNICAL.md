@@ -79,10 +79,20 @@ Future processing should transition `uploaded -> processing -> ready` or `failed
 
 ## Document Processing
 
-Document processing is synchronous in this stage. The lifecycle is `uploaded -> processing -> ready` on success and `uploaded|ready|failed -> processing -> failed` on controlled parser or file errors. Documents already in `processing` are blocked, while `ready` documents can be reprocessed.
+Document processing is synchronous in this stage. The lifecycle is `uploaded -> processing -> parsed -> chunked -> ready` on success and `uploaded|ready|failed -> processing -> failed` on controlled parser or file errors. Documents already in `processing` are blocked, while `ready` documents can be reprocessed.
 
 Parser implementations live under `app/parsers` and are registered explicitly through `ParserRegistry`. The registry maps known MIME types and extensions to parser instances; unsupported types are handled as controlled failures. There is no dynamic importing, eval, plugin loading, AI call, embedding generation, or vector database interaction.
 
-Current parsers support TXT and Markdown only. They read stored files as UTF-8 with fallback encodings, normalize line endings, and cap extracted text using `MAX_EXTRACTED_TEXT_CHARS`. PDF, DOCX, OCR, chunking, embeddings, and background workers are future RAG stages.
+Current parsers support TXT and Markdown only. They read stored files as UTF-8 with fallback encodings, normalize line endings, and cap extracted text using `MAX_EXTRACTED_TEXT_CHARS`. PDF, DOCX, OCR, embeddings, and background workers are future RAG stages.
 
-The parser abstraction exists before AI so storage, ownership, processing state, and text extraction can be tested independently. Future RAG should build on the extracted text by adding chunking, embedding generation, vector indexing, and project-scoped retrieval filtered through `project_documents`.
+The parser abstraction exists before AI so storage, ownership, processing state, and text extraction can be tested independently. Future RAG should build on the extracted text and generated chunks by adding embedding generation, vector indexing, and project-scoped retrieval filtered through `project_documents`.
+
+## Document Chunking
+
+Chunking is implemented before embeddings so the system can validate deterministic text segmentation, ownership boundaries, and future retrieval inputs without calling any model provider or vector database.
+
+The current strategy is `FixedSizeChunkingStrategy` in `app/chunking`. It normalizes whitespace, creates ordered fixed-size chunks with configurable `CHUNK_SIZE_CHARS` and `CHUNK_OVERLAP_CHARS`, ignores empty chunks, and estimates tokens with a simple `chars / 4` heuristic. Overlap must be smaller than chunk size.
+
+Reprocessing deletes old chunks and recreates them from the latest extracted text. `Document.chunk_count` and `Document.chunked_at` are persisted after chunk creation. `GET /api/v1/documents/{document_id}/chunks` returns only chunks for documents owned by the authenticated user.
+
+Future RAG work should add embeddings after chunking, then store vectors for these chunk rows and filter retrieval through `project_documents` so project chat only searches chunks from documents attached to that project.

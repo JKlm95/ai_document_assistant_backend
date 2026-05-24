@@ -33,14 +33,36 @@ class DocumentResponse(BaseModel):
     extracted_text_length: int | None
     processed_at: datetime | None
     processing_error: str | None
+    chunk_count: int
+    chunked_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class DocumentChunkResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    document_id: UUID
+    chunk_index: int
+    text: str
+    char_count: int
+    token_count_estimate: int
+    start_offset: int
+    end_offset: int
+    created_at: datetime
 
 
 class DocumentContentResponse(BaseModel):
     document: DocumentResponse
     extracted_text: str | None
     extracted_text_length: int | None
+
+
+class DocumentChunksResponse(BaseModel):
+    document: DocumentResponse
+    chunks: list[DocumentChunkResponse]
+    chunk_count: int
 
 
 class DocumentUploadResponse(BaseModel):

@@ -5,6 +5,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.chunking.fixed_size_chunker import FixedSizeChunkingStrategy
 from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
 from app.models.user import User
@@ -77,15 +78,26 @@ def get_parser_registry() -> ParserRegistry:
     return ParserRegistry()
 
 
+def get_chunking_strategy(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> FixedSizeChunkingStrategy:
+    return FixedSizeChunkingStrategy(
+        chunk_size_chars=settings.chunk_size_chars,
+        chunk_overlap_chars=settings.chunk_overlap_chars,
+    )
+
+
 def get_document_processing_service(
     document_repository: Annotated[DocumentRepository, Depends(get_document_repository)],
     parser_registry: Annotated[ParserRegistry, Depends(get_parser_registry)],
+    chunking_strategy: Annotated[FixedSizeChunkingStrategy, Depends(get_chunking_strategy)],
     storage_service: Annotated[LocalStorageService, Depends(get_local_storage_service)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> DocumentProcessingService:
     return DocumentProcessingService(
         document_repository=document_repository,
         parser_registry=parser_registry,
+        chunking_strategy=chunking_strategy,
         storage_service=storage_service,
         max_extracted_text_chars=settings.max_extracted_text_chars,
     )

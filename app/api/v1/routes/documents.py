@@ -21,6 +21,8 @@ from app.api.deps import (
 )
 from app.models.user import User
 from app.schemas.document import (
+    DocumentChunkResponse,
+    DocumentChunksResponse,
     DocumentContentResponse,
     DocumentCreateRequest,
     DocumentListResponse,
@@ -128,6 +130,29 @@ async def get_document_content(
         document=DocumentResponse.model_validate(document),
         extracted_text=document.extracted_text,
         extracted_text_length=document.extracted_text_length,
+    )
+
+
+@router.get("/documents/{document_id}/chunks", response_model=DocumentChunksResponse)
+async def list_document_chunks(
+    document_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    processing_service: Annotated[
+        DocumentProcessingService,
+        Depends(get_document_processing_service),
+    ],
+) -> DocumentChunksResponse:
+    try:
+        document, chunks = await processing_service.list_document_chunks(
+            document_id=document_id,
+            owner_id=current_user.id,
+        )
+    except ProcessingDocumentNotFoundError as exc:
+        raise _not_found() from exc
+    return DocumentChunksResponse(
+        document=DocumentResponse.model_validate(document),
+        chunks=[DocumentChunkResponse.model_validate(chunk) for chunk in chunks],
+        chunk_count=document.chunk_count,
     )
 
 

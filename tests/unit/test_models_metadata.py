@@ -32,15 +32,16 @@ def test_metadata_contains_expected_tables() -> None:
     }
 
 
-def test_document_chunk_embedding_dimension_is_768() -> None:
-    embedding_column = DocumentChunk.__table__.columns["embedding"]
+def test_document_chunk_columns_match_chunking_contract() -> None:
+    chunk_columns = DocumentChunk.__table__.columns
 
-    assert embedding_column.type.dim == 768
-
-
-def test_document_chunk_uses_chunk_metadata_column_name() -> None:
-    assert "chunk_metadata" in DocumentChunk.__table__.columns
-    assert "metadata" not in DocumentChunk.__table__.columns
+    assert "text" in chunk_columns
+    assert "char_count" in chunk_columns
+    assert "token_count_estimate" in chunk_columns
+    assert "start_offset" in chunk_columns
+    assert "end_offset" in chunk_columns
+    assert "embedding" not in chunk_columns
+    assert "chunk_metadata" not in chunk_columns
 
 
 def test_document_metadata_columns_match_current_api_contract() -> None:
@@ -55,3 +56,5 @@ def test_document_metadata_columns_match_current_api_contract() -> None:
     assert "storage_path" in document_columns
     assert "file_extension" in document_columns
     assert "uploaded_at" in document_columns
+    assert "chunk_count" in document_columns
+    assert "chunked_at" in document_columns

@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 class DocumentProcessingStatus(StrEnum):
     UPLOADED = "uploaded"
     PROCESSING = "processing"
+    PARSED = "parsed"
+    CHUNKED = "chunked"
     READY = "ready"
     FAILED = "failed"
 
@@ -65,6 +67,8 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     extracted_text_length: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chunk_count: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
+    chunked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     owner: Mapped[User] = relationship(back_populates="documents")
     project_documents: Mapped[list[ProjectDocument]] = relationship(
