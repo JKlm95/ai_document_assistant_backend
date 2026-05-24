@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import BigInteger, Enum, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
 class DocumentProcessingStatus(StrEnum):
     UPLOADED = "uploaded"
     PROCESSING = "processing"
-    PROCESSED = "processed"
+    READY = "ready"
     FAILED = "failed"
 
 
@@ -39,6 +40,7 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    storage_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     storage_provider: Mapped[str] = mapped_column(
         String(50),
         default="local",
@@ -56,7 +58,9 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
     )
     file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    file_extension: Mapped[str | None] = mapped_column(String(20), nullable=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     owner: Mapped[User] = relationship(back_populates="documents")
     project_documents: Mapped[list[ProjectDocument]] = relationship(

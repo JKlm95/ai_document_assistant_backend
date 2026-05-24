@@ -52,4 +52,6 @@ def test_document_metadata_columns_match_current_api_contract() -> None:
     assert "mime_type" in document_columns
     assert "file_size_bytes" in document_columns
     assert "processing_status" in document_columns
-    assert "storage_path" not in document_columns
+    assert "storage_path" in document_columns
+    assert "file_extension" in document_columns
+    assert "uploaded_at" in document_columns

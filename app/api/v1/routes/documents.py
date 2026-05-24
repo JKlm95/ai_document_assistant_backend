@@ -1,16 +1,38 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 
-from app.api.deps import get_current_user, get_document_service
+from app.api.deps import get_current_user, get_document_service, get_local_storage_service
 from app.models.user import User
-from app.schemas.document import DocumentCreateRequest, DocumentListResponse, DocumentResponse
+from app.schemas.document import (
+    DocumentCreateRequest,
+    DocumentListResponse,
+    DocumentResponse,
+    DocumentUploadResponse,
+)
 from app.services.document_service import (
     DocumentNotFoundError,
     DocumentService,
     ProjectDocumentLinkNotFoundError,
     ProjectNotFoundError,
+)
+from app.storage.local_storage import (
+    EmptyUploadError,
+    LocalStorageService,
+    StorageConflictError,
+    UnsupportedUploadTypeError,
+    UploadTooLargeError,
 )
 
 router = APIRouter()
@@ -47,6 +69,54 @@ async def list_documents(
         offset=offset,
     )
     return _document_list_response(documents, total=total, limit=limit, offset=offset)
+
+
+@router.post(
+    "/documents/upload",
+    response_model=DocumentUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_document(
+    current_user: Annotated[User, Depends(get_current_user)],
+    document_service: Annotated[DocumentService, Depends(get_document_service)],
+    storage_service: Annotated[LocalStorageService, Depends(get_local_storage_service)],
+    file: Annotated[UploadFile, File()],
+    project_id: Annotated[UUID | None, Form()] = None,
+) -> DocumentUploadResponse:
+    try:
+        document, linked_project_id = await document_service.upload_document(
+            owner_id=current_user.id,
+            upload_file=file,
+            storage_service=storage_service,
+            project_id=project_id,
+        )
+    except ProjectNotFoundError as exc:
+        raise _not_found() from exc
+    except UploadTooLargeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="Uploaded file is too large",
+        ) from exc
+    except EmptyUploadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty",
+        ) from exc
+    except UnsupportedUploadTypeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported upload file type",
+        ) from exc
+    except StorageConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Generated storage path already exists",
+        ) from exc
+
+    return DocumentUploadResponse(
+        document=DocumentResponse.model_validate(document),
+        linked_project_id=linked_project_id,
+    )
 
 
 @router.get("/documents/{document_id}", response_model=DocumentResponse)

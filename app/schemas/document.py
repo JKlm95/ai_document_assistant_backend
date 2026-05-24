@@ -25,10 +25,18 @@ class DocumentResponse(BaseModel):
     mime_type: str
     file_size_bytes: int
     storage_provider: str
+    storage_path: str | None
+    file_extension: str | None
     processing_status: DocumentProcessingStatus
     content_hash: str | None
+    uploaded_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class DocumentUploadResponse(BaseModel):
+    document: DocumentResponse
+    linked_project_id: UUID | None = None
 
 
 class DocumentListResponse(BaseModel):

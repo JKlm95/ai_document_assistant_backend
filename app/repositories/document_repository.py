@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -20,6 +21,10 @@ class DocumentRepository:
         file_size_bytes: int,
         storage_provider: str,
         content_hash: str | None,
+        document_id: UUID | None = None,
+        storage_path: str | None = None,
+        file_extension: str | None = None,
+        uploaded_at: datetime | None = None,
     ) -> Document:
         document = Document(
             owner_id=owner_id,
@@ -29,7 +34,12 @@ class DocumentRepository:
             file_size_bytes=file_size_bytes,
             storage_provider=storage_provider,
             content_hash=content_hash,
+            storage_path=storage_path,
+            file_extension=file_extension,
+            uploaded_at=uploaded_at,
         )
+        if document_id is not None:
+            document.id = document_id
         self._session.add(document)
         await self._session.flush()
         await self._session.refresh(document)

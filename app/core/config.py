@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     embedding_model: str = "nomic-embed-text"
     chat_model: str = "llama3.1"
 
+    storage_root: str = "storage"
+    max_upload_size_bytes: int = 10 * 1024 * 1024
+    allowed_upload_extensions: str = "pdf,txt,md,docx"
+    allowed_upload_mime_types: str = (
+        "application/pdf,text/plain,text/markdown,application/markdown,"
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
@@ -13,6 +14,7 @@ from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService, InvalidCredentialsError
 from app.services.document_service import DocumentService
 from app.services.project_service import ProjectService
+from app.storage.local_storage import LocalStorageService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
@@ -58,6 +60,17 @@ def get_document_service(
     )
 
 
+def get_local_storage_service(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> LocalStorageService:
+    return LocalStorageService(
+        storage_root=Path(settings.storage_root),
+        max_upload_size_bytes=settings.max_upload_size_bytes,
+        allowed_extensions=_split_csv_setting(settings.allowed_upload_extensions),
+        allowed_mime_types=_split_csv_setting(settings.allowed_upload_mime_types),
+    )
+
+
 async def get_current_user(
     token: Annotated[str, Depends(oauth2_scheme)],
     auth_service: Annotated[AuthService, Depends(get_auth_service)],
@@ -70,3 +83,7 @@ async def get_current_user(
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+
+
+def _split_csv_setting(value: str) -> set[str]:
+    return {item.strip() for item in value.split(",") if item.strip()}

@@ -126,6 +126,25 @@ curl -X DELETE http://localhost:8000/api/v1/projects/<project_id>/documents/<doc
   -H "Authorization: Bearer <access_token>"
 ```
 
+Upload a local file:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/documents/upload \
+  -H "Authorization: Bearer <access_token>" \
+  -F "file=@./notes.txt"
+```
+
+Upload and attach to a project:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/documents/upload \
+  -H "Authorization: Bearer <access_token>" \
+  -F "file=@./notes.txt" \
+  -F "project_id=<project_id>"
+```
+
+Allowed upload extensions are `pdf`, `txt`, `md`, and `docx`. Uploaded files are stored locally under the configured `STORAGE_ROOT`; files are not publicly served.
+
 ## Development Without Docker
 
 ```bash

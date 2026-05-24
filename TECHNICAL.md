@@ -66,3 +66,13 @@ The current document lifecycle is metadata-first: users can create document reco
 Documents are owned globally by a user and can be attached to many projects through `project_documents`. Project-document linking is idempotent: repeating the same attach request returns the document without creating a duplicate link. Detach removes only the link, not the document metadata record.
 
 Metadata-first architecture lets the API, ownership boundaries, project linking, and future processing state be validated before introducing storage and RAG complexity. The future RAG pipeline should add upload/storage, text extraction, chunk creation, embedding generation, and project-scoped vector retrieval filtered through `project_documents`.
+
+## Upload Storage
+
+Local upload storage is implemented behind a storage service abstraction in `app/storage`. The current implementation writes files to `storage/documents/{user_id}/{document_id}/original.{ext}` using `pathlib`, UUID-based directories, sanitized original filenames for metadata only, and chunked SHA-256 hashing while streaming the upload.
+
+The upload lifecycle is: authenticate user, validate MIME/extension/size, reject empty files, write to local storage, create document metadata with `processing_status=uploaded`, and optionally attach the document to an owned project. If metadata creation fails after the file is written, the service deletes the stored file.
+
+Security constraints: never trust client filenames for paths, prevent path traversal through storage-root resolution, avoid overwriting generated paths, keep storage outside public static serving, and return `404` for foreign project/document access to avoid resource existence leaks.
+
+Future processing should transition `uploaded -> processing -> ready` or `failed`, then add parser-specific extraction, chunking, embedding generation, and RAG retrieval. S3/MinIO, presigned URLs, OCR, and background workers are intentionally out of scope for the local storage foundation.
