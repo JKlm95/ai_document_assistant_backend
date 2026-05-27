@@ -8,12 +8,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.chunking.fixed_size_chunker import FixedSizeChunkingStrategy
 from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
+from app.embeddings.base import EmbeddingProvider
+from app.embeddings.registry import EmbeddingProviderRegistry
 from app.models.user import User
 from app.parsers.registry import ParserRegistry
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.project_repository import ProjectRepository
 from app.repositories.user_repository import UserRepository
 from app.services.auth_service import AuthService, InvalidCredentialsError
+from app.services.document_embedding_service import DocumentEmbeddingService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.project_service import ProjectService
@@ -100,6 +103,29 @@ def get_document_processing_service(
         chunking_strategy=chunking_strategy,
         storage_service=storage_service,
         max_extracted_text_chars=settings.max_extracted_text_chars,
+    )
+
+
+def get_embedding_provider(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> EmbeddingProvider:
+    return EmbeddingProviderRegistry(
+        provider_name=settings.embedding_provider,
+        model_name=settings.embedding_model,
+        dimensions=settings.embedding_dimensions,
+        openai_api_key=settings.openai_api_key,
+    ).get_provider()
+
+
+def get_document_embedding_service(
+    document_repository: Annotated[DocumentRepository, Depends(get_document_repository)],
+    embedding_provider: Annotated[EmbeddingProvider, Depends(get_embedding_provider)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> DocumentEmbeddingService:
+    return DocumentEmbeddingService(
+        document_repository=document_repository,
+        embedding_provider=embedding_provider,
+        embedding_dimensions=settings.embedding_dimensions,
     )
 
 

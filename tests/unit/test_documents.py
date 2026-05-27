@@ -14,6 +14,7 @@ from starlette.datastructures import Headers
 
 from app.api.deps import (
     get_current_user,
+    get_document_embedding_service,
     get_document_processing_service,
     get_document_service,
     get_local_storage_service,
@@ -21,13 +22,24 @@ from app.api.deps import (
 )
 from app.chunking.fixed_size_chunker import FixedSizeChunkingStrategy
 from app.chunking.models import ChunkResult
+from app.embeddings.base import EmbeddingProviderError
+from app.embeddings.models import EmbeddingResult
+from app.embeddings.providers.mock import MockEmbeddingProvider
+from app.embeddings.registry import EmbeddingProviderRegistry
 from app.main import create_app
-from app.models.document import Document, DocumentProcessingStatus, ProjectDocument
-from app.models.document_chunk import DocumentChunk
+from app.models.document import (
+    Document,
+    DocumentClassification,
+    DocumentProcessingMode,
+    DocumentProcessingStatus,
+    ProjectDocument,
+)
+from app.models.document_chunk import ChunkEmbeddingStatus, DocumentChunk
 from app.models.project import Project
 from app.models.user import User
 from app.parsers.base import ParsedDocument
 from app.parsers.registry import ParserRegistry
+from app.services.document_embedding_service import DocumentEmbeddingService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.project_service import ProjectService
@@ -113,6 +125,14 @@ class InMemoryDocumentRepository:
         storage_path: str | None = None,
         file_extension: str | None = None,
         uploaded_at: datetime | None = None,
+        classification: DocumentClassification = DocumentClassification.INTERNAL,
+        processing_mode: DocumentProcessingMode = DocumentProcessingMode.PREFER_LOCAL,
+        language: str | None = None,
+        country: str | None = None,
+        document_type: str | None = None,
+        tags: list[str] | None = None,
+        source_url: str | None = None,
+        version: str | None = None,
     ) -> Document:
         now = datetime.now(UTC)
         document = Document(
@@ -131,6 +151,14 @@ class InMemoryDocumentRepository:
         document.processing_status = DocumentProcessingStatus.UPLOADED
         document.chunk_count = 0
         document.chunked_at = None
+        document.classification = classification
+        document.processing_mode = processing_mode
+        document.language = language
+        document.country = country
+        document.document_type = document_type
+        document.tags = tags
+        document.source_url = source_url
+        document.version = version
         document.created_at = now
         document.updated_at = now
         self.documents[document.id] = document
@@ -224,6 +252,13 @@ class InMemoryDocumentRepository:
                 end_offset=chunk.end_offset,
             )
             document_chunk.id = uuid4()
+            document_chunk.embedding_status = ChunkEmbeddingStatus.PENDING
+            document_chunk.embedding_provider = None
+            document_chunk.embedding_model = None
+            document_chunk.embedded_at = None
+            document_chunk.embedding_error = None
+            document_chunk.embedding_dimensions = None
+            document_chunk.embedding_vector = None
             document_chunk.created_at = now
             document_chunks.append(document_chunk)
         self.chunks[document_id] = document_chunks
@@ -234,6 +269,38 @@ class InMemoryDocumentRepository:
             self.chunks.get(document_id, []),
             key=lambda chunk: chunk.chunk_index,
         )
+
+    async def reset_embeddings_for_document(self, *, document_id: UUID) -> None:
+        for chunk in self.chunks.get(document_id, []):
+            chunk.embedding_provider = None
+            chunk.embedding_model = None
+            chunk.embedded_at = None
+            chunk.embedding_error = None
+            chunk.embedding_status = ChunkEmbeddingStatus.PENDING
+            chunk.embedding_dimensions = None
+            chunk.embedding_vector = None
+
+    async def search_similar_chunks(
+        self,
+        *,
+        owner_id: UUID,
+        query_vector: list[float],
+        limit: int,
+    ) -> list[tuple[DocumentChunk, float]]:
+        candidates: list[tuple[DocumentChunk, float]] = []
+        for document_id, chunks in self.chunks.items():
+            document = self.documents[document_id]
+            if document.owner_id != owner_id:
+                continue
+            for chunk in chunks:
+                if (
+                    chunk.embedding_status != ChunkEmbeddingStatus.EMBEDDED
+                    or chunk.embedding_vector is None
+                ):
+                    continue
+                candidates.append((chunk, _cosine_similarity(query_vector, chunk.embedding_vector)))
+        candidates.sort(key=lambda item: item[1], reverse=True)
+        return candidates[:limit]
 
     async def commit(self) -> None:
         return None
@@ -263,6 +330,14 @@ def documents_client(tmp_path: Path) -> Iterator[DocumentsClient]:
         storage_service=storage_service,
         max_extracted_text_chars=10_000,
     )
+    embedding_service = DocumentEmbeddingService(  # type: ignore[arg-type]
+        document_repository=document_repository,
+        embedding_provider=MockEmbeddingProvider(
+            model_name="mock-embedding",
+            dimensions=8,
+        ),
+        embedding_dimensions=8,
+    )
     users = {
         "user-one": _build_user(email="one@example.com"),
         "user-two": _build_user(email="two@example.com"),
@@ -282,6 +357,7 @@ def documents_client(tmp_path: Path) -> Iterator[DocumentsClient]:
     app.dependency_overrides[get_project_service] = lambda: project_service
     app.dependency_overrides[get_document_service] = lambda: document_service
     app.dependency_overrides[get_document_processing_service] = lambda: processing_service
+    app.dependency_overrides[get_document_embedding_service] = lambda: embedding_service
     app.dependency_overrides[get_local_storage_service] = lambda: storage_service
 
     with TestClient(app) as client:
@@ -807,6 +883,181 @@ def test_process_ownership_isolation_and_auth_required(
 
 
 @pytest.mark.asyncio
+async def test_mock_embeddings_are_deterministic() -> None:
+    provider = MockEmbeddingProvider(model_name="mock", dimensions=8)
+
+    first = await provider.embed_texts(["alpha"])
+    second = await provider.embed_texts(["alpha"])
+
+    assert first == second
+    assert first[0].dimensions == 8
+
+
+def test_embedding_provider_registry_returns_mock_and_rejects_unknown() -> None:
+    registry = EmbeddingProviderRegistry(
+        provider_name="mock",
+        model_name="mock",
+        dimensions=8,
+        openai_api_key=None,
+    )
+
+    provider = registry.get_provider()
+
+    assert provider.provider_name == "mock"
+    with pytest.raises(EmbeddingProviderError):
+        EmbeddingProviderRegistry(
+            provider_name="unsupported",
+            model_name="mock",
+            dimensions=8,
+            openai_api_key=None,
+        ).get_provider()
+
+
+def test_embed_document_persists_vectors_and_statuses(documents_client: DocumentsClient) -> None:
+    document_id = _upload_process_and_embed(documents_client, content=b"alpha beta gamma")
+
+    status_response = documents_client.client.get(
+        f"/api/v1/documents/{document_id}/embedding-status",
+        headers=_auth_headers(),
+    )
+    chunks_response = documents_client.client.get(
+        f"/api/v1/documents/{document_id}/chunks",
+        headers=_auth_headers(),
+    )
+
+    assert status_response.status_code == 200
+    assert status_response.json()["embedded_chunks"] == status_response.json()["total_chunks"]
+    assert status_response.json()["pending_chunks"] == 0
+    assert status_response.json()["failed_chunks"] == 0
+    assert status_response.json()["document"]["processing_status"] == "ready"
+    assert chunks_response.json()["chunks"][0]["embedding_status"] == "embedded"
+    assert chunks_response.json()["chunks"][0]["embedding_dimensions"] == 8
+
+
+def test_reindex_replaces_embeddings(documents_client: DocumentsClient) -> None:
+    document_id = _upload_process_and_embed(documents_client, content=b"alpha beta gamma")
+    document_chunks = documents_client.document_repository.chunks[UUID(document_id)]
+    first_vector = document_chunks[0].embedding_vector
+
+    embed_response = documents_client.client.post(
+        f"/api/v1/documents/{document_id}/embed",
+        headers=_auth_headers(),
+    )
+    second_vector = document_chunks[0].embedding_vector
+
+    assert embed_response.status_code == 200
+    assert first_vector == second_vector
+    assert embed_response.json()["embedded_chunks"] == embed_response.json()["total_chunks"]
+
+
+def test_similar_chunks_orders_by_similarity(documents_client: DocumentsClient) -> None:
+    first_document_id = _upload_process_and_embed(
+        documents_client,
+        filename="alpha.txt",
+        content=b"alpha alpha alpha",
+    )
+    _upload_process_and_embed(
+        documents_client,
+        filename="zulu.txt",
+        content=b"zulu zulu zulu",
+    )
+
+    response = documents_client.client.get(
+        f"/api/v1/documents/{first_document_id}/similar-chunks?q=alpha&limit=2",
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 2
+    assert items[0]["similarity_score"] >= items[1]["similarity_score"]
+    assert "alpha" in items[0]["text"]
+
+
+def test_embedding_ownership_and_vector_search_isolation(
+    documents_client: DocumentsClient,
+) -> None:
+    owned_document_id = _upload_process_and_embed(
+        documents_client,
+        filename="owned.txt",
+        content=b"owned alpha",
+    )
+    foreign_upload = _upload_document(
+        documents_client.client,
+        filename="foreign-embed.txt",
+        content=b"foreign alpha",
+        content_type="text/plain",
+        token="user-two",
+    )
+    foreign_document_id = foreign_upload.json()["document"]["id"]
+    documents_client.client.post(
+        f"/api/v1/documents/{foreign_document_id}/process",
+        headers=_auth_headers("user-two"),
+    )
+    documents_client.client.post(
+        f"/api/v1/documents/{foreign_document_id}/embed",
+        headers=_auth_headers("user-two"),
+    )
+
+    foreign_status_response = documents_client.client.get(
+        f"/api/v1/documents/{foreign_document_id}/embedding-status",
+        headers=_auth_headers(),
+    )
+    search_response = documents_client.client.get(
+        f"/api/v1/documents/{owned_document_id}/similar-chunks?q=alpha&limit=10",
+        headers=_auth_headers(),
+    )
+
+    assert foreign_status_response.status_code == 404
+    assert search_response.status_code == 200
+    assert all("foreign" not in item["text"] for item in search_response.json()["items"])
+
+
+@pytest.mark.asyncio
+async def test_invalid_embedding_dimensions_marks_chunk_failed(tmp_path: Path) -> None:
+    document_repository, document = await _build_processed_document_for_embedding_test(tmp_path)
+    service = DocumentEmbeddingService(  # type: ignore[arg-type]
+        document_repository=document_repository,
+        embedding_provider=WrongDimensionsProvider(),
+        embedding_dimensions=8,
+    )
+
+    summary = await service.embed_document(document_id=document.id, owner_id=document.owner_id)
+
+    assert summary.failed_chunks == summary.total_chunks
+    assert summary.document.processing_status == DocumentProcessingStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_partial_chunk_failure_keeps_successful_embeddings(tmp_path: Path) -> None:
+    document_repository, document = await _build_processed_document_for_embedding_test(
+        tmp_path,
+        content=b"good chunk bad chunk",
+    )
+    service = DocumentEmbeddingService(  # type: ignore[arg-type]
+        document_repository=document_repository,
+        embedding_provider=PartiallyFailingProvider(),
+        embedding_dimensions=8,
+    )
+
+    summary = await service.embed_document(document_id=document.id, owner_id=document.owner_id)
+
+    assert summary.embedded_chunks >= 1
+    assert summary.failed_chunks >= 1
+    assert summary.document.processing_status == DocumentProcessingStatus.READY
+
+
+def test_similar_chunks_requires_auth(documents_client: DocumentsClient) -> None:
+    document_id = _upload_process_and_embed(documents_client, content=b"auth alpha")
+
+    response = documents_client.client.get(
+        f"/api/v1/documents/{document_id}/similar-chunks?q=alpha",
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_parser_exception_sets_failed_status(tmp_path: Path) -> None:
     project_repository = InMemoryProjectRepository()
     document_repository = InMemoryDocumentRepository()
@@ -886,6 +1137,30 @@ class FailingParserRegistry:
         return ExplodingParser()
 
 
+class WrongDimensionsProvider:
+    provider_name = "wrong"
+    model_name = "wrong"
+    dimensions = 4
+
+    async def embed_texts(self, texts: list[str]) -> list[EmbeddingResult]:
+        return [
+            EmbeddingResult(vector=[1.0, 0.0, 0.0, 0.0], provider="wrong", model="wrong")
+            for _ in texts
+        ]
+
+
+class PartiallyFailingProvider:
+    provider_name = "partial"
+    model_name = "partial"
+    dimensions = 8
+
+    async def embed_texts(self, texts: list[str]) -> list[EmbeddingResult]:
+        text = texts[0]
+        if "bad" in text:
+            raise EmbeddingProviderError("partial failure")
+        return await MockEmbeddingProvider(model_name="partial", dimensions=8).embed_texts(texts)
+
+
 def _get_document_from_test_app(documents_client: DocumentsClient, document_id: UUID) -> Document:
     return documents_client.document_repository.documents[document_id]
 
@@ -962,3 +1237,80 @@ def _build_upload_file(*, filename: str, content: bytes, content_type: str) -> U
     file.write(content)
     file.seek(0)
     return UploadFile(file=file, filename=filename, headers=Headers({"content-type": content_type}))
+
+
+def _upload_process_and_embed(
+    documents_client: DocumentsClient,
+    *,
+    content: bytes,
+    filename: str = "embedding.txt",
+    token: str = "user-one",
+) -> str:
+    upload_response = _upload_document(
+        documents_client.client,
+        filename=filename,
+        content=content,
+        content_type="text/plain",
+        token=token,
+    )
+    document_id = upload_response.json()["document"]["id"]
+    documents_client.client.post(
+        f"/api/v1/documents/{document_id}/process",
+        headers=_auth_headers(token),
+    )
+    documents_client.client.post(
+        f"/api/v1/documents/{document_id}/embed",
+        headers=_auth_headers(token),
+    )
+    return document_id
+
+
+async def _build_processed_document_for_embedding_test(
+    tmp_path: Path,
+    *,
+    content: bytes = b"good chunk",
+) -> tuple[InMemoryDocumentRepository, Document]:
+    project_repository = InMemoryProjectRepository()
+    document_repository = InMemoryDocumentRepository()
+    storage_service = _build_storage_service(tmp_path)
+    document_service = DocumentService(  # type: ignore[arg-type]
+        document_repository=document_repository,
+        project_repository=project_repository,
+    )
+    processing_service = DocumentProcessingService(  # type: ignore[arg-type]
+        document_repository=document_repository,
+        parser_registry=ParserRegistry(),
+        chunking_strategy=FixedSizeChunkingStrategy(
+            chunk_size_chars=10,
+            chunk_overlap_chars=0,
+        ),
+        storage_service=storage_service,
+        max_extracted_text_chars=10_000,
+    )
+    owner_id = uuid4()
+    document, _ = await document_service.upload_document(
+        owner_id=owner_id,
+        upload_file=_build_upload_file(
+            filename="embedding.txt",
+            content=content,
+            content_type="text/plain",
+        ),
+        storage_service=storage_service,
+        project_id=None,
+    )
+    document = await processing_service.process_document(
+        document_id=document.id,
+        owner_id=owner_id,
+    )
+    return document_repository, document
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    numerator = sum(
+        left_value * right_value for left_value, right_value in zip(left, right, strict=True)
+    )
+    left_magnitude = sum(value * value for value in left) ** 0.5
+    right_magnitude = sum(value * value for value in right) ** 0.5
+    if left_magnitude == 0 or right_magnitude == 0:
+        return 0.0
+    return numerator / (left_magnitude * right_magnitude)

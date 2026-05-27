@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -22,8 +23,22 @@ class DocumentProcessingStatus(StrEnum):
     PROCESSING = "processing"
     PARSED = "parsed"
     CHUNKED = "chunked"
+    EMBEDDED = "embedded"
+    INDEXED = "indexed"
     READY = "ready"
     FAILED = "failed"
+
+
+class DocumentClassification(StrEnum):
+    PUBLIC = "public"
+    INTERNAL = "internal"
+    CONFIDENTIAL = "confidential"
+
+
+class DocumentProcessingMode(StrEnum):
+    LOCAL_ONLY = "local_only"
+    EXTERNAL_ALLOWED = "external_allowed"
+    PREFER_LOCAL = "prefer_local"
 
 
 class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -69,6 +84,32 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     chunk_count: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
     chunked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    classification: Mapped[DocumentClassification] = mapped_column(
+        Enum(
+            DocumentClassification,
+            name="document_classification",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        default=DocumentClassification.INTERNAL,
+        server_default=DocumentClassification.INTERNAL.value,
+        nullable=False,
+    )
+    processing_mode: Mapped[DocumentProcessingMode] = mapped_column(
+        Enum(
+            DocumentProcessingMode,
+            name="document_processing_mode",
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        default=DocumentProcessingMode.PREFER_LOCAL,
+        server_default=DocumentProcessingMode.PREFER_LOCAL.value,
+        nullable=False,
+    )
+    language: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    document_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    tags: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    version: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     owner: Mapped[User] = relationship(back_populates="documents")
     project_documents: Mapped[list[ProjectDocument]] = relationship(

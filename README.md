@@ -156,9 +156,18 @@ curl http://localhost:8000/api/v1/documents/<document_id>/content \
 
 curl http://localhost:8000/api/v1/documents/<document_id>/chunks \
   -H "Authorization: Bearer <access_token>"
+
+curl -X POST http://localhost:8000/api/v1/documents/<document_id>/embed \
+  -H "Authorization: Bearer <access_token>"
+
+curl http://localhost:8000/api/v1/documents/<document_id>/embedding-status \
+  -H "Authorization: Bearer <access_token>"
+
+curl "http://localhost:8000/api/v1/documents/<document_id>/similar-chunks?q=project%20notes" \
+  -H "Authorization: Bearer <access_token>"
 ```
 
-Processing currently extracts text only for `txt` and `md` files, then creates deterministic fixed-size text chunks. PDF, DOCX, OCR, embeddings, vector search, and AI processing are intentionally not implemented yet.
+Processing currently extracts text only for `txt` and `md` files, creates deterministic fixed-size text chunks, and can index chunk embeddings with the configured backend provider. AI answers, chat, prompt orchestration, streaming, and citations are intentionally not implemented yet.
 
 ## Development Without Docker
 

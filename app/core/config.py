@@ -22,8 +22,11 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     gemini_api_key: str | None = None
     default_llm_provider: str = "ollama"
-    embedding_provider: str = "ollama"
+    embedding_provider: str = "mock"
     embedding_model: str = "nomic-embed-text"
+    embedding_dimensions: int = 768
+    openai_api_key: str | None = None
+    vector_search_limit: int = 5
     chat_model: str = "llama3.1"
 
     storage_root: str = "storage"

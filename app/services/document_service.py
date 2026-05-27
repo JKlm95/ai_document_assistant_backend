@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 from fastapi import UploadFile
 
-from app.models.document import Document
+from app.models.document import Document, DocumentClassification, DocumentProcessingMode
 from app.models.project import Project
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.project_repository import ProjectRepository
@@ -35,6 +35,14 @@ class DocumentService:
         storage_path: str | None = None,
         file_extension: str | None = None,
         uploaded_at: datetime | None = None,
+        classification: DocumentClassification = DocumentClassification.INTERNAL,
+        processing_mode: DocumentProcessingMode = DocumentProcessingMode.PREFER_LOCAL,
+        language: str | None = None,
+        country: str | None = None,
+        document_type: str | None = None,
+        tags: list[str] | None = None,
+        source_url: str | None = None,
+        version: str | None = None,
     ) -> Document:
         document = await self._document_repository.create(
             owner_id=owner_id,
@@ -48,6 +56,14 @@ class DocumentService:
             storage_path=storage_path,
             file_extension=file_extension,
             uploaded_at=uploaded_at,
+            classification=classification,
+            processing_mode=processing_mode,
+            language=language,
+            country=country,
+            document_type=document_type,
+            tags=tags,
+            source_url=source_url,
+            version=version,
         )
         await self._document_repository.commit()
         await self._document_repository.refresh(document)

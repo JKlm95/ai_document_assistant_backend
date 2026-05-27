@@ -79,7 +79,7 @@ Future processing should transition `uploaded -> processing -> ready` or `failed
 
 ## Document Processing
 
-Document processing is synchronous in this stage. The lifecycle is `uploaded -> processing -> parsed -> chunked -> ready` on success and `uploaded|ready|failed -> processing -> failed` on controlled parser or file errors. Documents already in `processing` are blocked, while `ready` documents can be reprocessed.
+Document processing is synchronous in this stage. The lifecycle is `uploaded -> processing -> parsed -> chunked -> embedded -> indexed -> ready` on success and `uploaded|ready|failed -> processing -> failed` on controlled parser or file errors. Documents already in `processing` are blocked, while `ready` documents can be reprocessed.
 
 Parser implementations live under `app/parsers` and are registered explicitly through `ParserRegistry`. The registry maps known MIME types and extensions to parser instances; unsupported types are handled as controlled failures. There is no dynamic importing, eval, plugin loading, AI call, embedding generation, or vector database interaction.
 
@@ -96,3 +96,15 @@ The current strategy is `FixedSizeChunkingStrategy` in `app/chunking`. It normal
 Reprocessing deletes old chunks and recreates them from the latest extracted text. `Document.chunk_count` and `Document.chunked_at` are persisted after chunk creation. `GET /api/v1/documents/{document_id}/chunks` returns only chunks for documents owned by the authenticated user.
 
 Future RAG work should add embeddings after chunking, then store vectors for these chunk rows and filter retrieval through `project_documents` so project chat only searches chunks from documents attached to that project.
+
+## Embeddings And pgvector
+
+Embeddings are implemented as a backend-controlled indexing foundation, not as chat or answer generation. `DocumentChunk` stores `embedding_status`, provider/model metadata, embedding dimensions, errors, timestamp, and `embedding_vector Vector(768)`. Chunks move through `pending -> embedded` or `failed`.
+
+The embedding provider abstraction lives under `app/embeddings`. `EmbeddingProviderRegistry` is explicit and supports `mock` for deterministic dev/tests, an OpenAI skeleton that fails when no API key is configured, and a local placeholder for future Ollama/local models. There is no dynamic loading, auto-discovery, LangChain, Haystack, or LlamaIndex.
+
+`DocumentEmbeddingService` reindexes safely by clearing previous vectors, embedding chunks again, recording partial failures per chunk, then moving the document through `embedded -> indexed -> ready` when no chunks exist or at least one chunk is indexed successfully. If all existing chunks fail, the document is marked `failed`.
+
+pgvector is enabled through migrations and indexed with an HNSW cosine index on `document_chunks.embedding_vector`. Repository vector search uses cosine distance and is scoped by `documents.owner_id`, so users cannot retrieve chunks from other owners. `similar-chunks` returns ranked chunks only; it does not build prompts, citations, chat state, or AI answers.
+
+Document metadata now includes classification and processing-mode hooks: `public/internal/confidential` and `local_only/external_allowed/prefer_local`. These fields prepare future AI routing and provider policy decisions but do not enforce a policy engine yet.

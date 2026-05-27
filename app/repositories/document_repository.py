@@ -5,8 +5,13 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.chunking.models import ChunkResult
-from app.models.document import Document, ProjectDocument
-from app.models.document_chunk import DocumentChunk
+from app.models.document import (
+    Document,
+    DocumentClassification,
+    DocumentProcessingMode,
+    ProjectDocument,
+)
+from app.models.document_chunk import ChunkEmbeddingStatus, DocumentChunk
 
 
 class DocumentRepository:
@@ -27,6 +32,14 @@ class DocumentRepository:
         storage_path: str | None = None,
         file_extension: str | None = None,
         uploaded_at: datetime | None = None,
+        classification: DocumentClassification = DocumentClassification.INTERNAL,
+        processing_mode: DocumentProcessingMode = DocumentProcessingMode.PREFER_LOCAL,
+        language: str | None = None,
+        country: str | None = None,
+        document_type: str | None = None,
+        tags: list[str] | None = None,
+        source_url: str | None = None,
+        version: str | None = None,
     ) -> Document:
         document = Document(
             owner_id=owner_id,
@@ -39,6 +52,14 @@ class DocumentRepository:
             storage_path=storage_path,
             file_extension=file_extension,
             uploaded_at=uploaded_at,
+            classification=classification,
+            processing_mode=processing_mode,
+            language=language,
+            country=country,
+            document_type=document_type,
+            tags=tags,
+            source_url=source_url,
+            version=version,
         )
         if document_id is not None:
             document.id = document_id
@@ -149,6 +170,39 @@ class DocumentRepository:
             .order_by(DocumentChunk.chunk_index.asc())
         )
         return list(result.scalars().all())
+
+    async def reset_embeddings_for_document(self, *, document_id: UUID) -> None:
+        chunks = await self.list_chunks_for_document(document_id=document_id)
+        for chunk in chunks:
+            chunk.embedding_provider = None
+            chunk.embedding_model = None
+            chunk.embedded_at = None
+            chunk.embedding_error = None
+            chunk.embedding_status = ChunkEmbeddingStatus.PENDING
+            chunk.embedding_dimensions = None
+            chunk.embedding_vector = None
+        await self._session.flush()
+
+    async def search_similar_chunks(
+        self,
+        *,
+        owner_id: UUID,
+        query_vector: list[float],
+        limit: int,
+    ) -> list[tuple[DocumentChunk, float]]:
+        distance = DocumentChunk.embedding_vector.cosine_distance(query_vector)
+        result = await self._session.execute(
+            select(DocumentChunk, (1 - distance).label("similarity_score"))
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .where(
+                Document.owner_id == owner_id,
+                DocumentChunk.embedding_status == ChunkEmbeddingStatus.EMBEDDED,
+                DocumentChunk.embedding_vector.is_not(None),
+            )
+            .order_by(distance.asc())
+            .limit(limit)
+        )
+        return [(chunk, float(score)) for chunk, score in result.all()]
 
     async def commit(self) -> None:
         await self._session.commit()

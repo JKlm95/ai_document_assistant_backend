@@ -15,19 +15,31 @@ from fastapi import (
 
 from app.api.deps import (
     get_current_user,
+    get_document_embedding_service,
     get_document_processing_service,
     get_document_service,
     get_local_storage_service,
 )
+from app.embeddings.base import EmbeddingProviderError, InvalidEmbeddingDimensionsError
 from app.models.user import User
 from app.schemas.document import (
     DocumentChunkResponse,
     DocumentChunksResponse,
     DocumentContentResponse,
     DocumentCreateRequest,
+    DocumentEmbeddingStatusResponse,
     DocumentListResponse,
     DocumentResponse,
     DocumentUploadResponse,
+    SimilarChunkResponse,
+    SimilarChunksResponse,
+)
+from app.services.document_embedding_service import (
+    DocumentEmbeddingService,
+    EmbeddingStatusSummary,
+)
+from app.services.document_embedding_service import (
+    DocumentNotFoundError as EmbeddingDocumentNotFoundError,
 )
 from app.services.document_processing_service import (
     DocumentAlreadyProcessingError,
@@ -67,6 +79,14 @@ async def create_document(
         file_size_bytes=payload.file_size_bytes,
         storage_provider=payload.storage_provider,
         content_hash=payload.content_hash,
+        classification=payload.classification,
+        processing_mode=payload.processing_mode,
+        language=payload.language,
+        country=payload.country,
+        document_type=payload.document_type,
+        tags=payload.tags,
+        source_url=payload.source_url,
+        version=payload.version,
     )
     return DocumentResponse.model_validate(document)
 
@@ -153,6 +173,99 @@ async def list_document_chunks(
         document=DocumentResponse.model_validate(document),
         chunks=[DocumentChunkResponse.model_validate(chunk) for chunk in chunks],
         chunk_count=document.chunk_count,
+    )
+
+
+@router.post("/documents/{document_id}/embed", response_model=DocumentEmbeddingStatusResponse)
+async def embed_document(
+    document_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    embedding_service: Annotated[
+        DocumentEmbeddingService,
+        Depends(get_document_embedding_service),
+    ],
+) -> DocumentEmbeddingStatusResponse:
+    try:
+        summary = await embedding_service.embed_document(
+            document_id=document_id,
+            owner_id=current_user.id,
+        )
+    except EmbeddingDocumentNotFoundError as exc:
+        raise _not_found() from exc
+    except EmbeddingProviderError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Embedding provider unavailable",
+        ) from exc
+    return _embedding_status_response(summary)
+
+
+@router.get(
+    "/documents/{document_id}/embedding-status",
+    response_model=DocumentEmbeddingStatusResponse,
+)
+async def get_document_embedding_status(
+    document_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    embedding_service: Annotated[
+        DocumentEmbeddingService,
+        Depends(get_document_embedding_service),
+    ],
+) -> DocumentEmbeddingStatusResponse:
+    try:
+        summary = await embedding_service.get_embedding_status(
+            document_id=document_id,
+            owner_id=current_user.id,
+        )
+    except EmbeddingDocumentNotFoundError as exc:
+        raise _not_found() from exc
+    return _embedding_status_response(summary)
+
+
+@router.get("/documents/{document_id}/similar-chunks", response_model=SimilarChunksResponse)
+async def find_similar_chunks(
+    document_id: UUID,
+    current_user: Annotated[User, Depends(get_current_user)],
+    embedding_service: Annotated[
+        DocumentEmbeddingService,
+        Depends(get_document_embedding_service),
+    ],
+    q: Annotated[str, Query(min_length=1)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 5,
+) -> SimilarChunksResponse:
+    try:
+        await embedding_service.get_embedding_status(
+            document_id=document_id,
+            owner_id=current_user.id,
+        )
+        chunks = await embedding_service.find_similar_chunks(
+            owner_id=current_user.id,
+            query=q,
+            limit=limit,
+        )
+    except EmbeddingDocumentNotFoundError as exc:
+        raise _not_found() from exc
+    except (EmbeddingProviderError, InvalidEmbeddingDimensionsError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Embedding provider unavailable",
+        ) from exc
+
+    return SimilarChunksResponse(
+        query=q,
+        limit=limit,
+        items=[
+            SimilarChunkResponse(
+                document_id=item.chunk.document_id,
+                chunk_id=item.chunk.id,
+                chunk_index=item.chunk.chunk_index,
+                text=item.chunk.text,
+                similarity_score=item.similarity_score,
+                embedding_provider=item.chunk.embedding_provider,
+                embedding_model=item.chunk.embedding_model,
+            )
+            for item in chunks
+        ],
     )
 
 
@@ -295,6 +408,16 @@ def _document_list_response(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+def _embedding_status_response(summary: EmbeddingStatusSummary) -> DocumentEmbeddingStatusResponse:
+    return DocumentEmbeddingStatusResponse(
+        document=DocumentResponse.model_validate(summary.document),
+        total_chunks=summary.total_chunks,
+        pending_chunks=summary.pending_chunks,
+        embedded_chunks=summary.embedded_chunks,
+        failed_chunks=summary.failed_chunks,
     )
 
 

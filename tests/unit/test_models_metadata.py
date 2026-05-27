@@ -40,6 +40,9 @@ def test_document_chunk_columns_match_chunking_contract() -> None:
     assert "token_count_estimate" in chunk_columns
     assert "start_offset" in chunk_columns
     assert "end_offset" in chunk_columns
+    assert "embedding_status" in chunk_columns
+    assert "embedding_vector" in chunk_columns
+    assert chunk_columns["embedding_vector"].type.dim == 768
     assert "embedding" not in chunk_columns
     assert "chunk_metadata" not in chunk_columns
 
@@ -58,3 +61,11 @@ def test_document_metadata_columns_match_current_api_contract() -> None:
     assert "uploaded_at" in document_columns
     assert "chunk_count" in document_columns
     assert "chunked_at" in document_columns
+    assert "classification" in document_columns
+    assert "processing_mode" in document_columns
+    assert "language" in document_columns
+    assert "country" in document_columns
+    assert "document_type" in document_columns
+    assert "tags" in document_columns
+    assert "source_url" in document_columns
+    assert "version" in document_columns
