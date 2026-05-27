@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 768
     openai_api_key: str | None = None
     vector_search_limit: int = 5
+    retrieval_default_limit: int = 5
+    retrieval_max_limit: int = 20
+    context_max_chars: int = 4_000
     chat_model: str = "llama3.1"
 
     storage_root: str = "storage"

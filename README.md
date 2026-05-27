@@ -167,7 +167,16 @@ curl "http://localhost:8000/api/v1/documents/<document_id>/similar-chunks?q=proj
   -H "Authorization: Bearer <access_token>"
 ```
 
-Processing currently extracts text only for `txt` and `md` files, creates deterministic fixed-size text chunks, and can index chunk embeddings with the configured backend provider. AI answers, chat, prompt orchestration, streaming, and citations are intentionally not implemented yet.
+Run project-scoped retrieval preview:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/projects/<project_id>/search \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"project notes","limit":5,"include_context":true}'
+```
+
+Processing currently extracts text only for `txt` and `md` files, creates deterministic fixed-size text chunks, can index chunk embeddings with the configured backend provider, and can return project-scoped retrieval results with context and citations. AI answers, chat, prompt orchestration, streaming, and conversation memory are intentionally not implemented yet.
 
 ## Development Without Docker
 

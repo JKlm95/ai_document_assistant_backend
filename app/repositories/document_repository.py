@@ -204,6 +204,30 @@ class DocumentRepository:
         )
         return [(chunk, float(score)) for chunk, score in result.all()]
 
+    async def search_similar_chunks_for_project(
+        self,
+        *,
+        owner_id: UUID,
+        project_id: UUID,
+        query_vector: list[float],
+        limit: int,
+    ) -> list[tuple[DocumentChunk, Document, float]]:
+        distance = DocumentChunk.embedding_vector.cosine_distance(query_vector)
+        result = await self._session.execute(
+            select(DocumentChunk, Document, (1 - distance).label("similarity_score"))
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .join(ProjectDocument, ProjectDocument.document_id == Document.id)
+            .where(
+                Document.owner_id == owner_id,
+                ProjectDocument.project_id == project_id,
+                DocumentChunk.embedding_status == ChunkEmbeddingStatus.EMBEDDED,
+                DocumentChunk.embedding_vector.is_not(None),
+            )
+            .order_by(distance.asc())
+            .limit(limit)
+        )
+        return [(chunk, document, float(score)) for chunk, document, score in result.all()]
+
     async def commit(self) -> None:
         await self._session.commit()
 

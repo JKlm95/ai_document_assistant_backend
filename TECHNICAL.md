@@ -108,3 +108,15 @@ The embedding provider abstraction lives under `app/embeddings`. `EmbeddingProvi
 pgvector is enabled through migrations and indexed with an HNSW cosine index on `document_chunks.embedding_vector`. Repository vector search uses cosine distance and is scoped by `documents.owner_id`, so users cannot retrieve chunks from other owners. `similar-chunks` returns ranked chunks only; it does not build prompts, citations, chat state, or AI answers.
 
 Document metadata now includes classification and processing-mode hooks: `public/internal/confidential` and `local_only/external_allowed/prefer_local`. These fields prepare future AI routing and provider policy decisions but do not enforce a policy engine yet.
+
+## Retrieval Preview
+
+Project-scoped retrieval lives under `app/rag` and is exposed through `POST /api/v1/projects/{project_id}/search`. It embeds the query through the configured backend embedding provider, runs vector search only across chunks from documents attached to that project, and returns ranked chunks, source references, optional context, and citations. It does not call an LLM.
+
+The repository search joins `project_documents`, `documents`, and `document_chunks`, and filters by `owner_id`, `project_id`, `embedding_status=embedded`, and non-null vectors. Missing or foreign projects return `404` to avoid resource existence leaks. Empty projects or projects without embedded chunks return an empty result set.
+
+`ContextBuilder` preserves similarity order, adds citation markers like `[1]`, separates chunks with readable delimiters, deduplicates repeated chunks, and enforces `CONTEXT_MAX_CHARS`. Retrieval limits are controlled by `RETRIEVAL_DEFAULT_LIMIT` and clamped by `RETRIEVAL_MAX_LIMIT`.
+
+Citations are stable source references built from document and chunk metadata: citation id, document id/title, chunk id/index, optional `source_url`, null `page_number` for TXT/Markdown, and text offsets. The structure is ready for later page numbers, section titles, bounding boxes, and original page references.
+
+This retrieval preview exists before an Ask/RAG endpoint so vector quality, project scoping, context assembly, and citation mapping can be debugged independently. Future work should add an ask endpoint that uses this retrieval layer to build prompts, call an LLM provider, persist chat sessions/messages, and return generated answers with citations.

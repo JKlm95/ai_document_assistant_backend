@@ -12,6 +12,8 @@ from app.embeddings.base import EmbeddingProvider
 from app.embeddings.registry import EmbeddingProviderRegistry
 from app.models.user import User
 from app.parsers.registry import ParserRegistry
+from app.rag.context_builder import ContextBuilder
+from app.rag.retriever import ProjectRetriever
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.project_repository import ProjectRepository
 from app.repositories.user_repository import UserRepository
@@ -126,6 +128,30 @@ def get_document_embedding_service(
         document_repository=document_repository,
         embedding_provider=embedding_provider,
         embedding_dimensions=settings.embedding_dimensions,
+    )
+
+
+def get_context_builder(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ContextBuilder:
+    return ContextBuilder(max_chars=settings.context_max_chars)
+
+
+def get_project_retriever(
+    project_repository: Annotated[ProjectRepository, Depends(get_project_repository)],
+    document_repository: Annotated[DocumentRepository, Depends(get_document_repository)],
+    embedding_provider: Annotated[EmbeddingProvider, Depends(get_embedding_provider)],
+    context_builder: Annotated[ContextBuilder, Depends(get_context_builder)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ProjectRetriever:
+    return ProjectRetriever(
+        project_repository=project_repository,
+        document_repository=document_repository,
+        embedding_provider=embedding_provider,
+        embedding_dimensions=settings.embedding_dimensions,
+        context_builder=context_builder,
+        default_limit=settings.retrieval_default_limit,
+        max_limit=settings.retrieval_max_limit,
     )
 
 

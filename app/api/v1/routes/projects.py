@@ -3,13 +3,22 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
-from app.api.deps import get_current_user, get_project_service
+from app.api.deps import get_current_user, get_project_retriever, get_project_service
+from app.embeddings.base import EmbeddingProviderError, InvalidEmbeddingDimensionsError
 from app.models.user import User
+from app.rag.retriever import ProjectNotFoundError as RetrievalProjectNotFoundError
+from app.rag.retriever import ProjectRetriever
 from app.schemas.project import (
     ProjectCreateRequest,
     ProjectListResponse,
     ProjectResponse,
     ProjectUpdateRequest,
+)
+from app.schemas.rag import (
+    ProjectSearchRequest,
+    ProjectSearchResponse,
+    ProjectSearchResultResponse,
+    SourceReferenceResponse,
 )
 from app.services.project_service import (
     ProjectAccessDeniedError,
@@ -80,6 +89,55 @@ async def get_project(
             detail="Project access denied",
         ) from exc
     return ProjectResponse.model_validate(project)
+
+
+@router.post("/{project_id}/search", response_model=ProjectSearchResponse)
+async def search_project(
+    project_id: UUID,
+    payload: ProjectSearchRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    project_retriever: Annotated[ProjectRetriever, Depends(get_project_retriever)],
+) -> ProjectSearchResponse:
+    try:
+        result = await project_retriever.search_project(
+            project_id=project_id,
+            owner_id=current_user.id,
+            query=payload.query,
+            limit=payload.limit,
+            include_context=payload.include_context,
+        )
+    except RetrievalProjectNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found",
+        ) from exc
+    except (EmbeddingProviderError, InvalidEmbeddingDimensionsError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Embedding provider unavailable",
+        ) from exc
+
+    return ProjectSearchResponse(
+        query=result.query,
+        project_id=result.project_id,
+        results=[
+            ProjectSearchResultResponse(
+                chunk_id=item.chunk_id,
+                document_id=item.document_id,
+                document_title=item.document_title,
+                chunk_index=item.chunk_index,
+                text=item.text,
+                similarity_score=item.similarity_score,
+                source_reference=SourceReferenceResponse(**item.source_reference.__dict__),
+                metadata=item.metadata,
+            )
+            for item in result.results
+        ],
+        context=result.context,
+        citations=[
+            SourceReferenceResponse(**citation.__dict__) for citation in result.citations
+        ],
+    )
 
 
 @router.patch("/{project_id}", response_model=ProjectResponse)

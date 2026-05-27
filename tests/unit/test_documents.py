@@ -18,6 +18,7 @@ from app.api.deps import (
     get_document_processing_service,
     get_document_service,
     get_local_storage_service,
+    get_project_retriever,
     get_project_service,
 )
 from app.chunking.fixed_size_chunker import FixedSizeChunkingStrategy
@@ -39,6 +40,9 @@ from app.models.project import Project
 from app.models.user import User
 from app.parsers.base import ParsedDocument
 from app.parsers.registry import ParserRegistry
+from app.rag.context_builder import ContextBuilder
+from app.rag.models import RetrievalResult, SourceReference
+from app.rag.retriever import ProjectRetriever
 from app.services.document_embedding_service import DocumentEmbeddingService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
@@ -51,6 +55,7 @@ class DocumentsClient:
     client: TestClient
     storage_root: Path
     document_repository: "InMemoryDocumentRepository"
+    project_repository: "InMemoryProjectRepository"
 
 
 class InMemoryProjectRepository:
@@ -302,6 +307,36 @@ class InMemoryDocumentRepository:
         candidates.sort(key=lambda item: item[1], reverse=True)
         return candidates[:limit]
 
+    async def search_similar_chunks_for_project(
+        self,
+        *,
+        owner_id: UUID,
+        project_id: UUID,
+        query_vector: list[float],
+        limit: int,
+    ) -> list[tuple[DocumentChunk, Document, float]]:
+        candidates: list[tuple[DocumentChunk, Document, float]] = []
+        linked_document_ids = {
+            document_id
+            for linked_project_id, document_id in self.project_documents
+            if linked_project_id == project_id
+        }
+        for document_id in linked_document_ids:
+            document = self.documents[document_id]
+            if document.owner_id != owner_id:
+                continue
+            for chunk in self.chunks.get(document_id, []):
+                if (
+                    chunk.embedding_status != ChunkEmbeddingStatus.EMBEDDED
+                    or chunk.embedding_vector is None
+                ):
+                    continue
+                candidates.append(
+                    (document, chunk, _cosine_similarity(query_vector, chunk.embedding_vector))
+                )
+        candidates.sort(key=lambda item: item[2], reverse=True)
+        return [(chunk, document, score) for document, chunk, score in candidates[:limit]]
+
     async def commit(self) -> None:
         return None
 
@@ -338,6 +373,18 @@ def documents_client(tmp_path: Path) -> Iterator[DocumentsClient]:
         ),
         embedding_dimensions=8,
     )
+    project_retriever = ProjectRetriever(  # type: ignore[arg-type]
+        project_repository=project_repository,
+        document_repository=document_repository,
+        embedding_provider=MockEmbeddingProvider(
+            model_name="mock-embedding",
+            dimensions=8,
+        ),
+        embedding_dimensions=8,
+        context_builder=ContextBuilder(max_chars=500),
+        default_limit=5,
+        max_limit=3,
+    )
     users = {
         "user-one": _build_user(email="one@example.com"),
         "user-two": _build_user(email="two@example.com"),
@@ -358,6 +405,7 @@ def documents_client(tmp_path: Path) -> Iterator[DocumentsClient]:
     app.dependency_overrides[get_document_service] = lambda: document_service
     app.dependency_overrides[get_document_processing_service] = lambda: processing_service
     app.dependency_overrides[get_document_embedding_service] = lambda: embedding_service
+    app.dependency_overrides[get_project_retriever] = lambda: project_retriever
     app.dependency_overrides[get_local_storage_service] = lambda: storage_service
 
     with TestClient(app) as client:
@@ -365,6 +413,7 @@ def documents_client(tmp_path: Path) -> Iterator[DocumentsClient]:
             client=client,
             storage_root=tmp_path,
             document_repository=document_repository,
+            project_repository=project_repository,
         )
 
     app.dependency_overrides.clear()
@@ -1057,6 +1106,292 @@ def test_similar_chunks_requires_auth(documents_client: DocumentsClient) -> None
     assert response.status_code == 401
 
 
+def test_project_search_returns_only_chunks_from_project(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Retrieval")
+    other_project = _create_project(documents_client.client, name="Other retrieval")
+    project_id = project.json()["id"]
+    other_project_id = other_project.json()["id"]
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=project_id,
+        filename="target.txt",
+        content=b"alpha project target",
+    )
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=other_project_id,
+        filename="other.txt",
+        content=b"alpha other project",
+    )
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/search",
+        json={"query": "alpha", "limit": 5},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"]
+    assert all("other project" not in item["text"] for item in response.json()["results"])
+
+
+def test_project_search_does_not_leak_foreign_user_chunks(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Own retrieval")
+    foreign_project = _create_project(
+        documents_client.client,
+        name="Foreign retrieval",
+        token="user-two",
+    )
+    project_id = project.json()["id"]
+    foreign_project_id = foreign_project.json()["id"]
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=project_id,
+        filename="own-search.txt",
+        content=b"shared alpha own",
+    )
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=foreign_project_id,
+        filename="foreign-search.txt",
+        content=b"shared alpha foreign",
+        token="user-two",
+    )
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/search",
+        json={"query": "shared alpha", "limit": 10},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert all("foreign" not in item["text"] for item in response.json()["results"])
+
+
+def test_project_search_empty_project_returns_empty_results(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Empty retrieval")
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project.json()['id']}/search",
+        json={"query": "anything"},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"] == []
+    assert response.json()["citations"] == []
+    assert response.json()["context"] == ""
+
+
+def test_project_search_ignores_unembedded_chunks(documents_client: DocumentsClient) -> None:
+    project = _create_project(documents_client.client, name="Pending chunks")
+    project_id = project.json()["id"]
+    upload = _upload_document(
+        documents_client.client,
+        filename="pending.txt",
+        content=b"pending alpha",
+        content_type="text/plain",
+        project_id=project_id,
+    )
+    document_id = upload.json()["document"]["id"]
+    documents_client.client.post(
+        f"/api/v1/documents/{document_id}/process",
+        headers=_auth_headers(),
+    )
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/search",
+        json={"query": "pending alpha"},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"] == []
+
+
+def test_project_search_clamps_limit_to_configured_max(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Limit retrieval")
+    project_id = project.json()["id"]
+    for index in range(5):
+        _upload_process_embed_and_attach(
+            documents_client,
+            project_id=project_id,
+            filename=f"limit-{index}.txt",
+            content=f"alpha document {index}".encode(),
+        )
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/search",
+        json={"query": "alpha", "limit": 99},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["results"]) == 3
+
+
+def test_project_search_context_and_citations(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Citations")
+    project_id = project.json()["id"]
+    document_id = _upload_process_embed_and_attach(
+        documents_client,
+        project_id=project_id,
+        filename="citations.txt",
+        content=b"citation alpha source",
+    )
+    documents_client.document_repository.documents[UUID(document_id)].source_url = (
+        "https://example.com/source"
+    )
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/search",
+        json={"query": "citation alpha", "limit": 1},
+        headers=_auth_headers(),
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert "[1]" in body["context"]
+    assert body["citations"][0]["citation_id"] == "[1]"
+    assert body["citations"][0]["document_id"] == document_id
+    assert body["citations"][0]["chunk_id"] == body["results"][0]["chunk_id"]
+    assert body["citations"][0]["page_number"] is None
+    assert body["citations"][0]["source_url"] == "https://example.com/source"
+
+
+def test_context_builder_respects_max_chars() -> None:
+    project_id = uuid4()
+    source = _build_source_reference(project_id=project_id, index=1)
+    result = _build_retrieval_result(project_id=project_id, source=source, text="x" * 100)
+
+    context = ContextBuilder(max_chars=30).build_context([result])
+
+    assert len(context) <= 30
+    assert context.startswith("[1]")
+
+
+def test_project_search_requires_auth_and_foreign_project_returns_404(
+    documents_client: DocumentsClient,
+) -> None:
+    foreign_project = _create_project(
+        documents_client.client,
+        name="Foreign search",
+        token="user-two",
+    )
+
+    unauthenticated_response = documents_client.client.post(
+        f"/api/v1/projects/{foreign_project.json()['id']}/search",
+        json={"query": "alpha"},
+    )
+    foreign_response = documents_client.client.post(
+        f"/api/v1/projects/{foreign_project.json()['id']}/search",
+        json={"query": "alpha"},
+        headers=_auth_headers(),
+    )
+    missing_response = documents_client.client.post(
+        f"/api/v1/projects/{uuid4()}/search",
+        json={"query": "alpha"},
+        headers=_auth_headers(),
+    )
+
+    assert unauthenticated_response.status_code == 401
+    assert foreign_response.status_code == 404
+    assert missing_response.status_code == 404
+
+
+def test_project_search_provider_dimension_mismatch_is_503(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Bad dimensions")
+    project_id = project.json()["id"]
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=project_id,
+        filename="bad-dimensions.txt",
+        content=b"alpha bad dimensions",
+    )
+    bad_retriever = ProjectRetriever(  # type: ignore[arg-type]
+        project_repository=documents_client.project_repository,
+        document_repository=documents_client.document_repository,
+        embedding_provider=WrongDimensionsProvider(),
+        embedding_dimensions=8,
+        context_builder=ContextBuilder(max_chars=500),
+        default_limit=5,
+        max_limit=5,
+    )
+    documents_client.client.app.dependency_overrides[get_project_retriever] = lambda: bad_retriever
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/search",
+        json={"query": "alpha"},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 503
+
+
+def test_project_search_provider_unavailable_is_503(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Unavailable provider")
+    project_id = project.json()["id"]
+    bad_retriever = ProjectRetriever(  # type: ignore[arg-type]
+        project_repository=documents_client.project_repository,
+        document_repository=documents_client.document_repository,
+        embedding_provider=UnavailableProvider(),
+        embedding_dimensions=8,
+        context_builder=ContextBuilder(max_chars=500),
+        default_limit=5,
+        max_limit=5,
+    )
+    documents_client.client.app.dependency_overrides[get_project_retriever] = lambda: bad_retriever
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/search",
+        json={"query": "alpha"},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 503
+
+
+def test_project_search_is_deterministic_with_mock_provider(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Deterministic retrieval")
+    project_id = project.json()["id"]
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=project_id,
+        filename="deterministic.txt",
+        content=b"alpha deterministic retrieval",
+    )
+
+    first_response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/search",
+        json={"query": "alpha deterministic"},
+        headers=_auth_headers(),
+    )
+    second_response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/search",
+        json={"query": "alpha deterministic"},
+        headers=_auth_headers(),
+    )
+
+    assert first_response.status_code == 200
+    assert first_response.json() == second_response.json()
+
+
 @pytest.mark.asyncio
 async def test_parser_exception_sets_failed_status(tmp_path: Path) -> None:
     project_repository = InMemoryProjectRepository()
@@ -1161,6 +1496,15 @@ class PartiallyFailingProvider:
         return await MockEmbeddingProvider(model_name="partial", dimensions=8).embed_texts(texts)
 
 
+class UnavailableProvider:
+    provider_name = "unavailable"
+    model_name = "unavailable"
+    dimensions = 8
+
+    async def embed_texts(self, texts: list[str]) -> list[EmbeddingResult]:
+        raise EmbeddingProviderError("provider unavailable")
+
+
 def _get_document_from_test_app(documents_client: DocumentsClient, document_id: UUID) -> Document:
     return documents_client.document_repository.documents[document_id]
 
@@ -1263,6 +1607,66 @@ def _upload_process_and_embed(
         headers=_auth_headers(token),
     )
     return document_id
+
+
+def _upload_process_embed_and_attach(
+    documents_client: DocumentsClient,
+    *,
+    project_id: str,
+    content: bytes,
+    filename: str,
+    token: str = "user-one",
+) -> str:
+    upload_response = _upload_document(
+        documents_client.client,
+        filename=filename,
+        content=content,
+        content_type="text/plain",
+        token=token,
+        project_id=project_id,
+    )
+    document_id = upload_response.json()["document"]["id"]
+    documents_client.client.post(
+        f"/api/v1/documents/{document_id}/process",
+        headers=_auth_headers(token),
+    )
+    documents_client.client.post(
+        f"/api/v1/documents/{document_id}/embed",
+        headers=_auth_headers(token),
+    )
+    return document_id
+
+
+def _build_source_reference(*, project_id: UUID, index: int) -> SourceReference:
+    return SourceReference(
+        citation_id=f"[{index}]",
+        document_id=project_id,
+        document_title="Document",
+        chunk_id=uuid4(),
+        chunk_index=index - 1,
+        source_url=None,
+        page_number=None,
+        start_offset=0,
+        end_offset=100,
+    )
+
+
+def _build_retrieval_result(
+    *,
+    project_id: UUID,
+    source: SourceReference,
+    text: str,
+) -> RetrievalResult:
+    return RetrievalResult(
+        chunk_id=source.chunk_id,
+        document_id=project_id,
+        document_title=source.document_title,
+        chunk_index=source.chunk_index,
+        text=text,
+        similarity_score=1.0,
+        source_reference=source,
+        metadata={},
+    )
 
 
 async def _build_processed_document_for_embedding_test(
