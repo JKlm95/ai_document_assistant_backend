@@ -20,6 +20,7 @@ from app.api.deps import (
     get_local_storage_service,
     get_project_retriever,
     get_project_service,
+    get_rag_answer_service,
 )
 from app.chunking.fixed_size_chunker import FixedSizeChunkingStrategy
 from app.chunking.models import ChunkResult
@@ -27,6 +28,10 @@ from app.embeddings.base import EmbeddingProviderError
 from app.embeddings.models import EmbeddingResult
 from app.embeddings.providers.mock import MockEmbeddingProvider
 from app.embeddings.registry import EmbeddingProviderRegistry
+from app.llm.base import LLMProviderError
+from app.llm.models import LLMResult
+from app.llm.providers.mock_provider import MockLLMProvider
+from app.llm.registry import LLMProviderRegistry
 from app.main import create_app
 from app.models.document import (
     Document,
@@ -42,11 +47,13 @@ from app.parsers.base import ParsedDocument
 from app.parsers.registry import ParserRegistry
 from app.rag.context_builder import ContextBuilder
 from app.rag.models import RetrievalResult, SourceReference
+from app.rag.prompt_builder import PromptBuilder
 from app.rag.retriever import ProjectRetriever
 from app.services.document_embedding_service import DocumentEmbeddingService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.project_service import ProjectService
+from app.services.rag_answer_service import RagAnswerService
 from app.storage.local_storage import LocalStorageService
 
 
@@ -385,6 +392,11 @@ def documents_client(tmp_path: Path) -> Iterator[DocumentsClient]:
         default_limit=5,
         max_limit=3,
     )
+    rag_answer_service = RagAnswerService(
+        project_retriever=project_retriever,
+        llm_provider=MockLLMProvider(model_name="mock-rag-answer"),
+        prompt_builder=PromptBuilder(),
+    )
     users = {
         "user-one": _build_user(email="one@example.com"),
         "user-two": _build_user(email="two@example.com"),
@@ -406,6 +418,7 @@ def documents_client(tmp_path: Path) -> Iterator[DocumentsClient]:
     app.dependency_overrides[get_document_processing_service] = lambda: processing_service
     app.dependency_overrides[get_document_embedding_service] = lambda: embedding_service
     app.dependency_overrides[get_project_retriever] = lambda: project_retriever
+    app.dependency_overrides[get_rag_answer_service] = lambda: rag_answer_service
     app.dependency_overrides[get_local_storage_service] = lambda: storage_service
 
     with TestClient(app) as client:
@@ -1392,6 +1405,229 @@ def test_project_search_is_deterministic_with_mock_provider(
     assert first_response.json() == second_response.json()
 
 
+def test_ask_returns_answer_with_citations_using_mock_llm(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Ask")
+    project_id = project.json()["id"]
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=project_id,
+        filename="ask.txt",
+        content=b"alpha answer source",
+    )
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/ask",
+        json={"question": "What does alpha say?", "retrieval_limit": 1},
+        headers=_auth_headers(),
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] == "answered"
+    assert body["answer"]
+    assert body["citations"][0]["citation_id"] == "[1]"
+    assert body["sources"][0]["source_reference"]["citation_id"] == "[1]"
+    assert body["used_context"] is None
+
+
+def test_ask_with_empty_retrieval_returns_insufficient_context(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Empty ask")
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project.json()['id']}/ask",
+        json={"question": "What is missing?", "include_context": True},
+        headers=_auth_headers(),
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] == "insufficient_context"
+    assert body["answer"] == "I could not find enough information in the provided documents."
+    assert body["citations"] == []
+    assert body["sources"] == []
+    assert body["used_context"] == ""
+
+
+def test_ask_foreign_project_and_unauthenticated(
+    documents_client: DocumentsClient,
+) -> None:
+    foreign_project = _create_project(
+        documents_client.client,
+        name="Foreign ask",
+        token="user-two",
+    )
+
+    unauthenticated_response = documents_client.client.post(
+        f"/api/v1/projects/{foreign_project.json()['id']}/ask",
+        json={"question": "Any answer?"},
+    )
+    foreign_response = documents_client.client.post(
+        f"/api/v1/projects/{foreign_project.json()['id']}/ask",
+        json={"question": "Any answer?"},
+        headers=_auth_headers(),
+    )
+
+    assert unauthenticated_response.status_code == 401
+    assert foreign_response.status_code == 404
+
+
+def test_ask_provider_unavailable_returns_failed_status(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Unavailable ask")
+    project_id = project.json()["id"]
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=project_id,
+        filename="unavailable-ask.txt",
+        content=b"alpha unavailable provider",
+    )
+    bad_service = RagAnswerService(
+        project_retriever=_build_project_retriever(documents_client),
+        llm_provider=UnavailableLLMProvider(),
+        prompt_builder=PromptBuilder(),
+    )
+    documents_client.client.app.dependency_overrides[get_rag_answer_service] = (
+        lambda: bad_service
+    )
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/ask",
+        json={"question": "What about alpha?"},
+        headers=_auth_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+
+
+def test_prompt_builder_includes_citations_and_grounding_rules() -> None:
+    source = _build_source_reference(project_id=uuid4(), index=1)
+
+    prompt = PromptBuilder().build_prompt(
+        question="What is alpha?",
+        context="[1] Alpha context",
+        citations=[source],
+    )
+
+    assert "[1]" in prompt
+    assert "Do not invent facts" in prompt
+    assert "untrusted content" in prompt
+    assert "ignore" in prompt.lower()
+
+
+def test_ask_does_not_leak_other_project_or_user_chunks(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Scoped ask")
+    other_project = _create_project(documents_client.client, name="Other ask")
+    foreign_project = _create_project(
+        documents_client.client,
+        name="Foreign scoped ask",
+        token="user-two",
+    )
+    project_id = project.json()["id"]
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=project_id,
+        filename="ask-own.txt",
+        content=b"shared alpha owned context",
+    )
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=other_project.json()["id"],
+        filename="ask-other.txt",
+        content=b"shared alpha other project context",
+    )
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=foreign_project.json()["id"],
+        filename="ask-foreign.txt",
+        content=b"shared alpha foreign context",
+        token="user-two",
+    )
+
+    response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/ask",
+        json={"question": "shared alpha", "include_context": True, "retrieval_limit": 10},
+        headers=_auth_headers(),
+    )
+
+    body = response.json()
+    assert response.status_code == 200
+    assert "ask-own" in body["used_context"]
+    assert "other project" not in body["used_context"]
+    assert "foreign" not in body["used_context"]
+
+
+def test_ask_include_context_flag_controls_used_context(
+    documents_client: DocumentsClient,
+) -> None:
+    project = _create_project(documents_client.client, name="Context flag ask")
+    project_id = project.json()["id"]
+    _upload_process_embed_and_attach(
+        documents_client,
+        project_id=project_id,
+        filename="context-flag.txt",
+        content=b"alpha context flag",
+    )
+
+    hidden_response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/ask",
+        json={"question": "alpha", "include_context": False},
+        headers=_auth_headers(),
+    )
+    visible_response = documents_client.client.post(
+        f"/api/v1/projects/{project_id}/ask",
+        json={"question": "alpha", "include_context": True},
+        headers=_auth_headers(),
+    )
+
+    assert hidden_response.status_code == 200
+    assert hidden_response.json()["used_context"] is None
+    assert visible_response.status_code == 200
+    assert visible_response.json()["used_context"]
+
+
+def test_llm_provider_registry_and_mock_are_deterministic() -> None:
+    registry = LLMProviderRegistry(
+        provider_name="mock",
+        model_name="mock",
+        openai_api_key=None,
+    )
+    provider = registry.get_provider()
+
+    assert provider.provider_name == "mock"
+    with pytest.raises(LLMProviderError):
+        LLMProviderRegistry(
+            provider_name="unsupported",
+            model_name="mock",
+            openai_api_key=None,
+        ).get_provider()
+
+
+@pytest.mark.asyncio
+async def test_mock_llm_provider_deterministic_output() -> None:
+    provider = MockLLMProvider(model_name="mock")
+
+    first = await provider.generate_answer(
+        prompt="prompt",
+        question="What is alpha?",
+        context="[1] Alpha",
+    )
+    second = await provider.generate_answer(
+        prompt="prompt",
+        question="What is alpha?",
+        context="[1] Alpha",
+    )
+
+    assert first == second
+
+
 @pytest.mark.asyncio
 async def test_parser_exception_sets_failed_status(tmp_path: Path) -> None:
     project_repository = InMemoryProjectRepository()
@@ -1505,6 +1741,14 @@ class UnavailableProvider:
         raise EmbeddingProviderError("provider unavailable")
 
 
+class UnavailableLLMProvider:
+    provider_name = "unavailable"
+    model_name = "unavailable"
+
+    async def generate_answer(self, *, prompt: str, question: str, context: str) -> LLMResult:
+        raise LLMProviderError("provider unavailable")
+
+
 def _get_document_from_test_app(documents_client: DocumentsClient, document_id: UUID) -> Document:
     return documents_client.document_repository.documents[document_id]
 
@@ -1573,6 +1817,21 @@ def _build_storage_service(storage_root: Path) -> LocalStorageService:
             "application/markdown",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         },
+    )
+
+
+def _build_project_retriever(documents_client: DocumentsClient) -> ProjectRetriever:
+    return ProjectRetriever(  # type: ignore[arg-type]
+        project_repository=documents_client.project_repository,
+        document_repository=documents_client.document_repository,
+        embedding_provider=MockEmbeddingProvider(
+            model_name="mock-embedding",
+            dimensions=8,
+        ),
+        embedding_dimensions=8,
+        context_builder=ContextBuilder(max_chars=500),
+        default_limit=5,
+        max_limit=3,
     )
 
 

@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     gemini_api_key: str | None = None
     default_llm_provider: str = "ollama"
+    llm_provider: str = "mock"
+    llm_model: str = "mock-rag-answer"
     embedding_provider: str = "mock"
     embedding_model: str = "nomic-embed-text"
     embedding_dimensions: int = 768

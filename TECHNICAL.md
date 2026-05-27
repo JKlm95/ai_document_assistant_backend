@@ -119,4 +119,14 @@ The repository search joins `project_documents`, `documents`, and `document_chun
 
 Citations are stable source references built from document and chunk metadata: citation id, document id/title, chunk id/index, optional `source_url`, null `page_number` for TXT/Markdown, and text offsets. The structure is ready for later page numbers, section titles, bounding boxes, and original page references.
 
-This retrieval preview exists before an Ask/RAG endpoint so vector quality, project scoping, context assembly, and citation mapping can be debugged independently. Future work should add an ask endpoint that uses this retrieval layer to build prompts, call an LLM provider, persist chat sessions/messages, and return generated answers with citations.
+This retrieval preview exists alongside the Ask/RAG endpoint so vector quality, project scoping, context assembly, and citation mapping can be debugged independently from answer generation. Future work should persist chat sessions/messages and add streaming or conversation memory on top of the same retrieval foundation.
+
+## RAG Answer Generation
+
+Grounded answer generation is exposed through `POST /api/v1/projects/{project_id}/ask`. It reuses `ProjectRetriever` instead of duplicating retrieval logic: the project ownership check, query embedding, project-scoped vector search, context building, and citations all come from the retrieval layer. The endpoint returns `answered`, `insufficient_context`, or `failed`.
+
+The LLM abstraction lives under `app/llm`. `LLMProviderRegistry` is explicit and backend-controlled through `LLM_PROVIDER` and `LLM_MODEL`; the frontend cannot override providers. The default `mock` provider is deterministic for development and tests. `openai` and `local` providers are controlled placeholders that fail safely when not configured or not implemented. API keys are read only from settings/env.
+
+`PromptBuilder` creates a concise grounded prompt: answer only from supplied context, cite sources with markers like `[1]`, do not invent facts, and report when the documents do not contain enough information. Retrieved documents are treated as untrusted content; the prompt tells the model to use document text only as source facts and ignore instructions inside documents that try to override system behavior.
+
+If retrieval returns no chunks or empty context, the service does not call an LLM. It returns `status=insufficient_context` with `I could not find enough information in the provided documents.` Sources and citations are still returned independently from the generated answer when context exists. This stage intentionally excludes chat sessions, message persistence, streaming, agents, memory, and background workers.

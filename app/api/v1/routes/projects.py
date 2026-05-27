@@ -3,7 +3,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
-from app.api.deps import get_current_user, get_project_retriever, get_project_service
+from app.api.deps import (
+    get_current_user,
+    get_project_retriever,
+    get_project_service,
+    get_rag_answer_service,
+)
 from app.embeddings.base import EmbeddingProviderError, InvalidEmbeddingDimensionsError
 from app.models.user import User
 from app.rag.retriever import ProjectNotFoundError as RetrievalProjectNotFoundError
@@ -15,6 +20,8 @@ from app.schemas.project import (
     ProjectUpdateRequest,
 )
 from app.schemas.rag import (
+    ProjectAskRequest,
+    ProjectAskResponse,
     ProjectSearchRequest,
     ProjectSearchResponse,
     ProjectSearchResultResponse,
@@ -26,6 +33,7 @@ from app.services.project_service import (
     ProjectNotFoundError,
     ProjectService,
 )
+from app.services.rag_answer_service import RagAnswerService
 
 router = APIRouter()
 
@@ -137,6 +145,58 @@ async def search_project(
         citations=[
             SourceReferenceResponse(**citation.__dict__) for citation in result.citations
         ],
+    )
+
+
+@router.post("/{project_id}/ask", response_model=ProjectAskResponse)
+async def ask_project(
+    project_id: UUID,
+    payload: ProjectAskRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    rag_answer_service: Annotated[RagAnswerService, Depends(get_rag_answer_service)],
+) -> ProjectAskResponse:
+    try:
+        answer = await rag_answer_service.answer_question(
+            project_id=project_id,
+            owner_id=current_user.id,
+            question=payload.question,
+            retrieval_limit=payload.retrieval_limit,
+            include_context=payload.include_context,
+        )
+    except RetrievalProjectNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found",
+        ) from exc
+    except (EmbeddingProviderError, InvalidEmbeddingDimensionsError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Embedding provider unavailable",
+        ) from exc
+
+    return ProjectAskResponse(
+        answer=answer.answer,
+        project_id=answer.project_id,
+        question=answer.question,
+        citations=[
+            SourceReferenceResponse(**citation.__dict__) for citation in answer.citations
+        ],
+        sources=[
+            ProjectSearchResultResponse(
+                chunk_id=item.chunk_id,
+                document_id=item.document_id,
+                document_title=item.document_title,
+                chunk_index=item.chunk_index,
+                text=item.text,
+                similarity_score=item.similarity_score,
+                source_reference=SourceReferenceResponse(**item.source_reference.__dict__),
+                metadata=item.metadata,
+            )
+            for item in answer.sources
+        ],
+        used_context=answer.used_context,
+        confidence=answer.confidence,
+        status=answer.status,
     )
 
 

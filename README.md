@@ -176,7 +176,18 @@ curl -X POST http://localhost:8000/api/v1/projects/<project_id>/search \
   -d '{"query":"project notes","limit":5,"include_context":true}'
 ```
 
-Processing currently extracts text only for `txt` and `md` files, creates deterministic fixed-size text chunks, can index chunk embeddings with the configured backend provider, and can return project-scoped retrieval results with context and citations. AI answers, chat, prompt orchestration, streaming, and conversation memory are intentionally not implemented yet.
+Generate a grounded answer from project documents:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/projects/<project_id>/ask \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What do these documents say about project notes?","retrieval_limit":5,"include_context":false}'
+```
+
+`/search` is a retrieval preview: it returns ranked chunks, context, and citations without calling an LLM. `/ask` uses the same project-scoped retrieval layer, builds a grounded prompt, calls the configured backend LLM provider, and returns an answer with citations and sources. If no useful context is found, `/ask` returns `status=insufficient_context` and does not fabricate an answer.
+
+Processing currently extracts text only for `txt` and `md` files, creates deterministic fixed-size text chunks, can index chunk embeddings with the configured backend provider, can return project-scoped retrieval results, and can generate grounded answers with citations. Chat history, streaming, conversation memory, and background workers are intentionally not implemented yet.
 
 ## Development Without Docker
 

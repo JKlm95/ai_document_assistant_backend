@@ -10,9 +10,12 @@ from app.core.config import Settings, get_settings
 from app.db.session import get_db_session
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.registry import EmbeddingProviderRegistry
+from app.llm.base import LLMProvider
+from app.llm.registry import LLMProviderRegistry
 from app.models.user import User
 from app.parsers.registry import ParserRegistry
 from app.rag.context_builder import ContextBuilder
+from app.rag.prompt_builder import PromptBuilder
 from app.rag.retriever import ProjectRetriever
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.project_repository import ProjectRepository
@@ -22,6 +25,7 @@ from app.services.document_embedding_service import DocumentEmbeddingService
 from app.services.document_processing_service import DocumentProcessingService
 from app.services.document_service import DocumentService
 from app.services.project_service import ProjectService
+from app.services.rag_answer_service import RagAnswerService
 from app.storage.local_storage import LocalStorageService
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -152,6 +156,32 @@ def get_project_retriever(
         context_builder=context_builder,
         default_limit=settings.retrieval_default_limit,
         max_limit=settings.retrieval_max_limit,
+    )
+
+
+def get_llm_provider(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> LLMProvider:
+    return LLMProviderRegistry(
+        provider_name=settings.llm_provider,
+        model_name=settings.llm_model,
+        openai_api_key=settings.openai_api_key,
+    ).get_provider()
+
+
+def get_prompt_builder() -> PromptBuilder:
+    return PromptBuilder()
+
+
+def get_rag_answer_service(
+    project_retriever: Annotated[ProjectRetriever, Depends(get_project_retriever)],
+    llm_provider: Annotated[LLMProvider, Depends(get_llm_provider)],
+    prompt_builder: Annotated[PromptBuilder, Depends(get_prompt_builder)],
+) -> RagAnswerService:
+    return RagAnswerService(
+        project_retriever=project_retriever,
+        llm_provider=llm_provider,
+        prompt_builder=prompt_builder,
     )
 
 

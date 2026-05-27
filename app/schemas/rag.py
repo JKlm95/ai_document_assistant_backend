@@ -2,6 +2,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.rag.models import AnswerStatus
+
 
 class ProjectSearchRequest(BaseModel):
     query: str = Field(min_length=1)
@@ -38,3 +40,20 @@ class ProjectSearchResponse(BaseModel):
     results: list[ProjectSearchResultResponse]
     context: str | None
     citations: list[SourceReferenceResponse]
+
+
+class ProjectAskRequest(BaseModel):
+    question: str = Field(min_length=1)
+    retrieval_limit: int | None = Field(default=None, ge=1)
+    include_context: bool = False
+
+
+class ProjectAskResponse(BaseModel):
+    answer: str
+    project_id: UUID
+    question: str
+    citations: list[SourceReferenceResponse]
+    sources: list[ProjectSearchResultResponse]
+    used_context: str | None = None
+    confidence: float | None = None
+    status: AnswerStatus
